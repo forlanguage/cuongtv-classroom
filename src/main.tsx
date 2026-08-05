@@ -129,6 +129,14 @@ function App() {
     return () => window.clearInterval(timer);
   }, [attendanceSession?.id]);
 
+  async function waitForVideoElement(): Promise<HTMLVideoElement> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (videoRef.current) return videoRef.current;
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    }
+    throw new Error('Không thể khởi tạo vùng xem camera.');
+  }
+
   async function handleLogin() {
     setMessage('');
     try { await loginWithGoogle(); }
@@ -178,7 +186,6 @@ function App() {
   }
 
   async function startQrScanner(session: AttendanceSession) {
-    if (!videoRef.current) return;
     if (!window.BarcodeDetector) {
       setMessage('Trình duyệt chưa hỗ trợ quét QR trực tiếp. Hãy dùng Chrome mới nhất trên điện thoại.');
       return;
@@ -188,8 +195,9 @@ function App() {
     setStudentStep('scan');
     setMessage('');
     try {
+      const video = await waitForVideoElement();
       stopCamera(cameraStream);
-      const stream = await openRearCamera(videoRef.current);
+      const stream = await openRearCamera(video);
       setCameraStream(stream);
       setScannerActive(true);
       const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
@@ -227,12 +235,12 @@ function App() {
   }
 
   async function handleOpenPhotoCamera() {
-    if (!videoRef.current) return;
+    setStudentStep('photo');
     setMessage('');
     try {
+      const video = await waitForVideoElement();
       stopCamera(cameraStream);
-      setCameraStream(await openRearCamera(videoRef.current));
-      setStudentStep('photo');
+      setCameraStream(await openRearCamera(video));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Không thể mở camera sau.');
     }
