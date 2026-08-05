@@ -4,6 +4,7 @@ import {
   doc,
   onSnapshot,
   serverTimestamp,
+  setDoc,
   updateDoc,
   writeBatch,
   type Unsubscribe,
@@ -139,12 +140,33 @@ export async function completeAttendanceClaim(claim: AttendanceClaim, pin: strin
 }
 
 export async function recordAttendanceByPin(sessionId: string, pin: string, profile: AccessProfile): Promise<void> {
-  await callGateway({
-    action: 'recordAttendanceByPin', courseId: ACTIVE_COURSE_ID, sessionId,
-    requestId: crypto.randomUUID(), pin: pin.trim(), email: profile.email,
-    studentId: profile.studentId || 'TEST-STUDENT', fullName: profile.fullName,
-    classCode: profile.classCode,
-  }, 2);
+  if (!db || !auth?.currentUser) throw new Error('Firebase chưa được cấu hình hoặc phiên đăng nhập đã hết hạn.');
+  const normalizedPin = pin.trim();
+  if (!/^\d{4}$/.test(normalizedPin)) throw new Error('PIN phải gồm đúng 4 chữ số.');
+
+  const recordRef = doc(
+    db,
+    'courses', ACTIVE_COURSE_ID,
+    'attendanceSessions', sessionId,
+    'records', profile.email,
+  );
+  await setDoc(recordRef, {
+    email: profile.email,
+    uid: auth.currentUser.uid,
+    studentId: profile.studentId || 'TEST-STUDENT',
+    fullName: profile.fullName || '',
+    classCode: profile.classCode || '',
+    submittedPin: normalizedPin,
+    requestId: crypto.randomUUID(),
+    checkedInAt: serverTimestamp(),
+    status: 'recorded',
+    statusLabel: 'Đã ghi nhận',
+    verificationMode: 'pin_only',
+    evidenceLevel: 'limited',
+    qrVerified: false,
+    photoProvided: false,
+    reviewStatus: 'needs_review',
+  });
 }
 
 export function observeOpenAttendanceSessions(callback: (sessions: AttendanceSession[]) => void): Unsubscribe {
