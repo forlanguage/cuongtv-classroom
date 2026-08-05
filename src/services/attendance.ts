@@ -180,6 +180,31 @@ export async function checkInAttendance(
   }, { merge: false });
 }
 
+export function observeOpenAttendanceSessions(
+  callback: (sessions: AttendanceSession[]) => void,
+): Unsubscribe {
+  if (!db) {
+    callback([]);
+    return () => undefined;
+  }
+
+  return onSnapshot(
+    collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'),
+    (snapshot) => {
+      const now = Date.now();
+      const sessions = snapshot.docs
+        .map((item) => ({ id: item.id, ...item.data() } as AttendanceSession))
+        .filter((session) => (
+          session.status === 'open'
+          && session.expiresAt instanceof Timestamp
+          && session.expiresAt.toMillis() > now
+        ))
+        .sort((left, right) => right.expiresAt.toMillis() - left.expiresAt.toMillis());
+      callback(sessions);
+    },
+  );
+}
+
 export function observeAttendanceCount(sessionId: string, callback: (count: number) => void): Unsubscribe {
   if (!db) {
     callback(0);

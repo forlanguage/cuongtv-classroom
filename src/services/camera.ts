@@ -5,7 +5,10 @@ export interface CapturedPhoto {
   height: number;
 }
 
-export async function openFrontCamera(video: HTMLVideoElement): Promise<MediaStream> {
+async function openCamera(
+  video: HTMLVideoElement,
+  facingMode: 'user' | 'environment',
+): Promise<MediaStream> {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error('Trình duyệt này không hỗ trợ truy cập camera trực tiếp.');
   }
@@ -13,7 +16,7 @@ export async function openFrontCamera(video: HTMLVideoElement): Promise<MediaStr
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
     video: {
-      facingMode: 'user',
+      facingMode: { ideal: facingMode },
       width: { ideal: 720 },
       height: { ideal: 960 },
     },
@@ -22,6 +25,14 @@ export async function openFrontCamera(video: HTMLVideoElement): Promise<MediaStr
   video.srcObject = stream;
   await video.play();
   return stream;
+}
+
+export function openFrontCamera(video: HTMLVideoElement): Promise<MediaStream> {
+  return openCamera(video, 'user');
+}
+
+export function openRearCamera(video: HTMLVideoElement): Promise<MediaStream> {
+  return openCamera(video, 'environment');
 }
 
 export function stopCamera(stream?: MediaStream | null): void {
