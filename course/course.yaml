@@ -1,0 +1,13 @@
+courseId: SAMPLE-2026-HK1
+courseName: Classroom Template
+semester: 2026-HK1
+timezone: Asia/Ho_Chi_Minh
+allowedEmailDomains:
+  - gm.uit.edu.vn
+classCodes:
+  - SAMPLE.Q01
+features:
+  attendance: true
+  assignments: true
+  fileUpload: true
+  aiAssistedGrading: false
