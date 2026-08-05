@@ -9,12 +9,13 @@ import {
   updateDoc,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { ref, uploadBytes } from 'firebase/storage';
-import { auth, db, storage } from './firebase';
+import { auth, db } from './firebase';
 import { ACTIVE_COURSE_ID, type AccessProfile } from './roster';
 
 export const QR_ROTATION_MS = 60_000;
 export const SESSION_DURATION_MINUTES = 5;
+
+const appsScriptUrl = import.meta.env.VITE_APPS_SCRIPT_URL as string | undefined;
 
 export interface AttendanceSession {
   id: string;
@@ -27,6 +28,14 @@ export interface AttendanceSession {
   expiresAt: Timestamp;
 }
 
+interface DriveUploadResponse {
+  ok: boolean;
+  fileId?: string;
+  fileName?: string;
+  downloadUrl?: string;
+  error?: string;
+}
+
 function randomToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(18));
   return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
@@ -34,6 +43,56 @@ function randomToken(): string {
 
 function randomPin(): string {
   return String(crypto.getRandomValues(new Uint32Array(1))[0] % 10_000).padStart(4, '0');
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function uploadAttendancePhoto(
+  sessionId: string,
+  profile: AccessProfile,
+  photo: Blob,
+): Promise<Required<Pick<DriveUploadResponse, 'fileId' | 'fileName' | 'downloadUrl'>>> {
+  if (!appsScriptUrl) {
+    throw new Error('Chưa cấu hình VITE_APPS_SCRIPT_URL cho cổng upload Google Drive.');
+  }
+  if (!auth?.currentUser) throw new Error('Phiên đăng nhập đã hết hạn.');
+
+  const idToken = await auth.currentUser.getIdToken();
+  const response = await fetch(appsScriptUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({
+      action: 'uploadAttendancePhoto',
+      idToken,
+      courseId: ACTIVE_COURSE_ID,
+      sessionId,
+      email: profile.email,
+      studentId: profile.studentId || 'TEST-STUDENT',
+      fullName: profile.fullName,
+      mimeType: 'image/jpeg',
+      fileBase64: await blobToBase64(photo),
+    }),
+  });
+
+  if (!response.ok) throw new Error(`Cổng upload trả về HTTP ${response.status}.`);
+  const result = await response.json() as DriveUploadResponse;
+  if (!result.ok || !result.fileId || !result.fileName || !result.downloadUrl) {
+    throw new Error(result.error || 'Không thể lưu ảnh điểm danh lên Google Drive.');
+  }
+  return {
+    fileId: result.fileId,
+    fileName: result.fileName,
+    downloadUrl: result.downloadUrl,
+  };
 }
 
 export async function openAttendanceSession(title: string): Promise<AttendanceSession> {
@@ -85,7 +144,7 @@ export async function checkInAttendance(
   profile: AccessProfile,
   photo: Blob,
 ): Promise<void> {
-  if (!db || !storage || !auth?.currentUser) throw new Error('Firebase chưa được cấu hình đầy đủ.');
+  if (!db || !auth?.currentUser) throw new Error('Firebase chưa được cấu hình đầy đủ.');
 
   const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId);
   const sessionSnapshot = await getDoc(sessionRef);
@@ -99,15 +158,7 @@ export async function checkInAttendance(
     throw new Error('Phiên điểm danh đã hết hạn.');
   }
 
-  const photoPath = `attendance/${ACTIVE_COURSE_ID}/${sessionId}/${auth.currentUser.uid}.jpg`;
-  await uploadBytes(ref(storage, photoPath), photo, {
-    contentType: 'image/jpeg',
-    customMetadata: {
-      email: profile.email,
-      studentId: profile.studentId,
-      sessionId,
-    },
-  });
+  const uploadedPhoto = await uploadAttendancePhoto(sessionId, profile, photo);
 
   await setDoc(doc(sessionRef, 'records', profile.email), {
     email: profile.email,
@@ -118,8 +169,11 @@ export async function checkInAttendance(
     token,
     pin: normalizedPin,
     slot: session.slot ?? 0,
-    photoPath,
+    photoFileId: uploadedPhoto.fileId,
+    photoFileName: uploadedPhoto.fileName,
+    photoDownloadUrl: uploadedPhoto.downloadUrl,
     photoSize: photo.size,
+    photoProvider: 'google-drive',
     checkedInAt: serverTimestamp(),
     status: 'present',
     reviewStatus: 'not_reviewed',
