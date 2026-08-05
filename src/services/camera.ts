@@ -1,9 +1,65 @@
+import jsQR from 'jsqr';
+
 export interface CapturedPhoto {
   blob: Blob;
   previewUrl: string;
   width: number;
   height: number;
 }
+
+type BarcodeResult = { rawValue?: string };
+type BarcodeDetectorLike = new (options: { formats: string[] }) => {
+  detect: (source: CanvasImageSource) => Promise<BarcodeResult[]>;
+};
+
+function sourceDimensions(source: CanvasImageSource): { width: number; height: number } {
+  if (source instanceof HTMLVideoElement) {
+    return { width: source.videoWidth, height: source.videoHeight };
+  }
+  if (source instanceof HTMLImageElement) {
+    return { width: source.naturalWidth, height: source.naturalHeight };
+  }
+  if (source instanceof HTMLCanvasElement) {
+    return { width: source.width, height: source.height };
+  }
+  if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) {
+    return { width: source.width, height: source.height };
+  }
+  return { width: 0, height: 0 };
+}
+
+function installBarcodeDetectorFallback(): void {
+  const browserWindow = window as Window & { BarcodeDetector?: BarcodeDetectorLike };
+  if (browserWindow.BarcodeDetector) return;
+
+  browserWindow.BarcodeDetector = class BarcodeDetectorFallback {
+    constructor(_options: { formats: string[] }) {}
+
+    async detect(source: CanvasImageSource): Promise<BarcodeResult[]> {
+      const sourceSize = sourceDimensions(source);
+      if (!sourceSize.width || !sourceSize.height) return [];
+
+      const maxDimension = 960;
+      const scale = Math.min(1, maxDimension / Math.max(sourceSize.width, sourceSize.height));
+      const width = Math.max(1, Math.round(sourceSize.width * scale));
+      const height = Math.max(1, Math.round(sourceSize.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) return [];
+
+      context.drawImage(source, 0, 0, width, height);
+      const image = context.getImageData(0, 0, width, height);
+      const decoded = jsQR(image.data, width, height, {
+        inversionAttempts: 'attemptBoth',
+      });
+      return decoded?.data ? [{ rawValue: decoded.data }] : [];
+    }
+  };
+}
+
+if (typeof window !== 'undefined') installBarcodeDetectorFallback();
 
 async function openCamera(
   video: HTMLVideoElement,

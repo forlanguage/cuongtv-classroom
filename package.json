@@ -11,6 +11,7 @@
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "firebase": "latest",
+    "jsqr": "latest",
     "qrcode": "latest",
     "vite": "latest",
     "react": "latest",
