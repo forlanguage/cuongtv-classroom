@@ -21,6 +21,7 @@ import {
 } from './services/attendance';
 import {
   captureCompressedPhoto,
+  decodeQrFromImageFile,
   openRearCamera,
   stopCamera,
   type CapturedPhoto,
@@ -64,8 +65,10 @@ function App() {
   const [photo, setPhoto] = useState<CapturedPhoto | null>(null);
   const [requestId, setRequestId] = useState('');
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [qrImageBusy, setQrImageBusy] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const scanTimerRef = useRef<number | null>(null);
+  const qrImageInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => observeAuth(setUser), []);
 
@@ -186,39 +189,46 @@ function App() {
     setPin('');
     setPhoto(null);
     setRequestId('');
+    setQrImageBusy(false);
+    if (qrImageInputRef.current) qrImageInputRef.current.value = '';
     setStudentStep('list');
     setMessage('');
   }
 
+  async function acceptQrValue(session: AttendanceSession, value: string) {
+    if (!profile) return;
+    const scannedUrl = new URL(value);
+    const challengeId = scannedUrl.searchParams.get('challenge');
+    if (!challengeId) throw new Error('QR không chứa challenge hợp lệ.');
+    const issuedClaim = await claimAttendanceChallenge(session.id, challengeId, profile);
+    stopCamera(cameraStream);
+    setCameraStream(null);
+    if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current);
+    setClaim(issuedClaim);
+    setStudentStep('pin');
+    setMessage('QR hợp lệ. Claim cá nhân đã được cấp trong 3 phút.');
+  }
+
   async function startQrScanner(session: AttendanceSession) {
     if (!profile) return;
-    if (!window.BarcodeDetector) {
-      setMessage('Trình duyệt chưa hỗ trợ quét QR trực tiếp. Hãy dùng Chrome mới trên điện thoại.');
-      return;
-    }
     setSelectedSession(session);
     setStudentStep('scan');
-    setMessage('');
+    setMessage('Có thể quét trực tiếp hoặc dùng nút “Chụp / chọn ảnh QR” trên iPhone.');
     try {
       const video = await waitForVideo();
       const stream = await openRearCamera(video);
       setCameraStream(stream);
-      const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+      const Detector = window.BarcodeDetector;
+      if (!Detector) throw new Error('Không có bộ giải mã QR.');
+      const detector = new Detector({ formats: ['qr_code'] });
       const scanFrame = async () => {
         if (!videoRef.current || !stream.active) return;
         try {
           const codes = await detector.detect(videoRef.current);
           const value = codes[0]?.rawValue;
           if (value) {
-            const scannedUrl = new URL(value);
-            const challengeId = scannedUrl.searchParams.get('challenge');
-            if (!challengeId) throw new Error('QR không chứa challenge hợp lệ.');
-            const issuedClaim = await claimAttendanceChallenge(session.id, challengeId, profile);
+            await acceptQrValue(session, value);
             stopCamera(stream);
-            setCameraStream(null);
-            setClaim(issuedClaim);
-            setStudentStep('pin');
-            setMessage('QR hợp lệ. Claim cá nhân đã được cấp trong 3 phút.');
             return;
           }
         } catch (error) {
@@ -228,7 +238,24 @@ function App() {
       };
       void scanFrame();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Không thể mở camera quét QR.');
+      setCameraStream(null);
+      setMessage('Không thể quét camera trực tiếp. Hãy nhấn “Chụp / chọn ảnh QR”.');
+    }
+  }
+
+  async function handleQrImageSelected(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file || !selectedSession) return;
+    setQrImageBusy(true);
+    setMessage('Đang đọc mã QR từ ảnh…');
+    try {
+      const value = await decodeQrFromImageFile(file);
+      await acceptQrValue(selectedSession, value);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Không thể đọc mã QR từ ảnh.');
+    } finally {
+      setQrImageBusy(false);
+      event.target.value = '';
     }
   }
 
@@ -364,8 +391,22 @@ function App() {
             {studentStep === 'scan' && (
               <>
                 <h3>Quét QR của phiên “{selectedSession?.title}”</h3>
-                <video ref={videoRef} muted playsInline className="camera-preview active" />
-                <button type="button" onClick={resetStudentFlow}>Quay lại</button>
+                <video ref={videoRef} muted playsInline className={cameraStream ? 'camera-preview active' : 'camera-preview'} />
+                <input
+                  ref={qrImageInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  hidden
+                  onChange={(event) => void handleQrImageSelected(event)}
+                />
+                <div className="attendance-controls">
+                  <button type="button" disabled={qrImageBusy} onClick={() => qrImageInputRef.current?.click()}>
+                    {qrImageBusy ? 'Đang đọc QR…' : 'Chụp / chọn ảnh QR'}
+                  </button>
+                  <button type="button" onClick={resetStudentFlow}>Quay lại</button>
+                </div>
+                <p>Trên iPhone, nút trên sẽ mở Camera hoặc Thư viện ảnh. Ảnh chỉ được xử lý trong trình duyệt để lấy challenge.</p>
               </>
             )}
             {studentStep === 'pin' && claim && (
