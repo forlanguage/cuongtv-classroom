@@ -2,6 +2,7 @@ import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebas
 import { auth, firebaseConfigured, googleProvider } from './firebase';
 
 export const ADMIN_EMAILS = new Set(['cuongtv@uit.edu.vn']);
+export const TEST_STUDENT_EMAILS = new Set(['cuongtv.ee@gmail.com']);
 
 export type AppRole = 'admin' | 'student' | 'guest';
 
@@ -13,6 +14,7 @@ export function resolveRole(user: User | null): AppRole {
   const email = normalizeEmail(user?.email);
   if (!email) return 'guest';
   if (ADMIN_EMAILS.has(email)) return 'admin';
+  if (TEST_STUDENT_EMAILS.has(email)) return 'student';
   if (email.endsWith('@gm.uit.edu.vn')) return 'student';
   return 'guest';
 }
