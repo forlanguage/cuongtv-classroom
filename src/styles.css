@@ -8,7 +8,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
-button, a { font: inherit; }
+button, input, a { font: inherit; }
 main { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 72px 0; }
 .hero { display: grid; grid-template-columns: 1.6fr 0.8fr; gap: 48px; align-items: center; }
 .eyebrow { color: #38bdf8; font-weight: 800; letter-spacing: .16em; font-size: .78rem; }
@@ -16,6 +16,8 @@ h1 { margin: 14px 0 18px; max-width: 780px; font-size: clamp(2.3rem, 6vw, 5rem);
 .hero p { max-width: 720px; color: #94a3b8; font-size: 1.08rem; line-height: 1.7; }
 .actions { display: flex; gap: 18px; align-items: center; margin-top: 28px; flex-wrap: wrap; }
 button { border: 0; border-radius: 999px; padding: 13px 20px; color: #082f49; background: #7dd3fc; font-weight: 800; cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .6; }
+input { width: min(100%, 360px); border: 1px solid #334155; border-radius: 14px; padding: 13px 15px; color: #e2e8f0; background: #020617; }
 a { color: #e2e8f0; text-underline-offset: 5px; }
 .status-card, article, .workflow { border: 1px solid #1e293b; background: rgba(15, 23, 42, .72); border-radius: 24px; }
 .status-card { padding: 26px; box-shadow: 0 20px 80px rgba(14, 165, 233, .08); }
@@ -37,11 +39,18 @@ article p { margin: 0; color: #94a3b8; line-height: 1.6; }
 .profile-grid div { display: grid; gap: 7px; padding: 18px; border: 1px solid #1e293b; border-radius: 16px; background: rgba(2, 6, 23, .42); }
 .profile-grid strong { color: #94a3b8; font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; }
 .profile-grid span { overflow-wrap: anywhere; }
+.attendance-box { margin-top: 28px; padding: 22px; border: 1px solid #334155; border-radius: 18px; background: rgba(2, 6, 23, .5); }
+.attendance-box h3 { margin: 0 0 10px; }
+.attendance-box p { color: #94a3b8; line-height: 1.6; }
+.attendance-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.qr-panel { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 24px; }
+.qr-panel img { width: 240px; max-width: 100%; border-radius: 16px; background: white; padding: 10px; }
 @media (max-width: 840px) {
   main { padding-top: 40px; }
   .hero { grid-template-columns: 1fr; }
   .modules { grid-template-columns: 1fr 1fr; }
   .profile-grid { grid-template-columns: 1fr; }
+  .qr-panel { grid-template-columns: 1fr; }
 }
 @media (max-width: 520px) {
   .modules { grid-template-columns: 1fr; }
