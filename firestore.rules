@@ -28,6 +28,14 @@ service cloud.firestore {
         && get(rosterPath(courseId)).data.role == 'student';
     }
 
+    function sessionPath(courseId, sessionId) {
+      return /databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId);
+    }
+
+    function sessionSecretPath(courseId, sessionId) {
+      return /databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId)/private/config;
+    }
+
     match /courses/{courseId} {
       allow read: if signedIn();
       allow write: if isAdmin();
@@ -51,7 +59,25 @@ service cloud.firestore {
         match /records/{email} {
           allow read: if isAdmin()
             || (isActiveStudent(courseId) && normalizedEmail() == email);
-          allow create, update, delete: if false;
+
+          allow create: if isActiveStudent(courseId)
+            && normalizedEmail() == email
+            && request.resource.data.email == normalizedEmail()
+            && request.resource.data.uid == request.auth.uid
+            && request.resource.data.status == 'recorded'
+            && request.resource.data.statusLabel == 'Đã ghi nhận'
+            && request.resource.data.verificationMode == 'pin_only'
+            && request.resource.data.evidenceLevel == 'limited'
+            && request.resource.data.qrVerified == false
+            && request.resource.data.photoProvided == false
+            && request.resource.data.reviewStatus == 'needs_review'
+            && request.resource.data.submittedPin is string
+            && request.resource.data.submittedPin.size() == 4
+            && request.resource.data.submittedPin == get(sessionSecretPath(courseId, sessionId)).data.pin
+            && get(sessionPath(courseId, sessionId)).data.status == 'open'
+            && request.time < get(sessionPath(courseId, sessionId)).data.expiresAt;
+
+          allow update, delete: if isAdmin();
         }
       }
 
