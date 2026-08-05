@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import type { User } from 'firebase/auth';
 import QRCode from 'qrcode';
@@ -7,15 +7,24 @@ import { firebaseConfigured } from './services/firebase';
 import { loginWithGoogle, logout, observeAuth } from './services/auth';
 import { loadAccessProfile, type AccessProfile } from './services/roster';
 import {
+  QR_ROTATION_MS,
   checkInAttendance,
   closeAttendanceSession,
+  observeAttendanceCount,
   openAttendanceSession,
+  rotateAttendanceCode,
   type AttendanceSession,
 } from './services/attendance';
+import {
+  captureCompressedPhoto,
+  openFrontCamera,
+  stopCamera,
+  type CapturedPhoto,
+} from './services/camera';
 
 const modules = [
   { title: 'Đăng ký lớp', detail: 'Xác thực Google và đối chiếu roster Firestore.', status: 'Hoàn thành' },
-  { title: 'Điểm danh QR', detail: 'Mở phiên, quét QR và ghi nhận thời gian máy chủ.', status: 'Đang triển khai' },
+  { title: 'Điểm danh QR', detail: 'QR và PIN đổi mỗi 60 giây, kèm ảnh hậu kiểm.', status: 'MVP 2' },
   { title: 'Bài tập trên lớp', detail: 'Trắc nghiệm, tự luận, lưu nháp và nộp bài.', status: 'Kế hoạch' },
   { title: 'Chấm điểm', detail: 'Chấm tự động, AI gợi ý và giảng viên duyệt.', status: 'Kế hoạch' },
 ];
@@ -30,6 +39,11 @@ function App() {
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [attendanceBusy, setAttendanceBusy] = useState(false);
   const [checkInDone, setCheckInDone] = useState(false);
+  const [pin, setPin] = useState('');
+  const [photo, setPhoto] = useState<CapturedPhoto | null>(null);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [attendanceCount, setAttendanceCount] = useState(0);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const attendanceParams = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
@@ -43,17 +57,14 @@ function App() {
 
   useEffect(() => {
     let active = true;
-
     async function resolveProfile() {
       setMessage('');
       setProfile(null);
       if (!user) return;
-
       setLoadingProfile(true);
       try {
         const accessProfile = await loadAccessProfile(user.email);
         if (!active) return;
-
         if (!accessProfile) {
           await logout();
           setMessage('Email Google này không có trong danh sách lớp IT006.Q24.');
@@ -61,45 +72,64 @@ function App() {
         }
         setProfile(accessProfile);
       } catch (error) {
-        if (active) {
-          setMessage(error instanceof Error ? error.message : 'Không thể kiểm tra danh sách lớp.');
-        }
+        if (active) setMessage(error instanceof Error ? error.message : 'Không thể kiểm tra danh sách lớp.');
       } finally {
         if (active) setLoadingProfile(false);
       }
     }
-
     void resolveProfile();
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, [user]);
+
+  useEffect(() => () => stopCamera(cameraStream), [cameraStream]);
+
+  useEffect(() => {
+    if (!attendanceSession) return;
+    return observeAttendanceCount(attendanceSession.id, setAttendanceCount);
+  }, [attendanceSession]);
+
+  useEffect(() => {
+    if (!attendanceSession) return;
+    let slot = attendanceSession.slot;
+    const timer = window.setInterval(() => {
+      slot += 1;
+      void (async () => {
+        try {
+          const next = await rotateAttendanceCode(attendanceSession.id, slot);
+          const updated = { ...attendanceSession, ...next, slot };
+          const url = new URL(window.location.href);
+          url.searchParams.set('attendanceSession', updated.id);
+          url.searchParams.set('token', updated.token);
+          setQrDataUrl(await QRCode.toDataURL(url.toString(), { width: 320, margin: 2 }));
+          setAttendanceSession(updated);
+        } catch (error) {
+          setMessage(error instanceof Error ? error.message : 'Không thể đổi mã điểm danh.');
+        }
+      })();
+    }, QR_ROTATION_MS);
+    return () => window.clearInterval(timer);
+  }, [attendanceSession?.id]);
 
   async function handleLogin() {
     setMessage('');
-    try {
-      await loginWithGoogle();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Không thể đăng nhập.');
-    }
+    try { await loginWithGoogle(); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Không thể đăng nhập.'); }
   }
 
   async function handleOpenAttendance() {
     setAttendanceBusy(true);
     setMessage('');
     try {
-      const session = await openAttendanceSession(attendanceTitle, 10);
+      const session = await openAttendanceSession(attendanceTitle);
       const url = new URL(window.location.href);
       url.searchParams.set('attendanceSession', session.id);
       url.searchParams.set('token', session.token);
-      const dataUrl = await QRCode.toDataURL(url.toString(), { width: 320, margin: 2 });
+      setQrDataUrl(await QRCode.toDataURL(url.toString(), { width: 320, margin: 2 }));
       setAttendanceSession(session);
-      setQrDataUrl(dataUrl);
+      setAttendanceCount(0);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Không thể mở phiên điểm danh.');
-    } finally {
-      setAttendanceBusy(false);
-    }
+    } finally { setAttendanceBusy(false); }
   }
 
   async function handleCloseAttendance() {
@@ -111,24 +141,47 @@ function App() {
       setQrDataUrl('');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Không thể đóng phiên điểm danh.');
-    } finally {
-      setAttendanceBusy(false);
+    } finally { setAttendanceBusy(false); }
+  }
+
+  async function handleStartCamera() {
+    if (!videoRef.current) return;
+    setMessage('');
+    try {
+      stopCamera(cameraStream);
+      setCameraStream(await openFrontCamera(videoRef.current));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Không thể mở camera.');
+    }
+  }
+
+  async function handleCapturePhoto() {
+    if (!videoRef.current || !profile) return;
+    try {
+      if (photo) URL.revokeObjectURL(photo.previewUrl);
+      const captured = await captureCompressedPhoto(
+        videoRef.current,
+        `${profile.studentId || profile.email} · IT006.Q24`,
+      );
+      setPhoto(captured);
+      stopCamera(cameraStream);
+      setCameraStream(null);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Không thể chụp ảnh.');
     }
   }
 
   async function handleCheckIn() {
-    if (!profile || !attendanceParams.sessionId || !attendanceParams.token) return;
+    if (!profile || !attendanceParams.sessionId || !attendanceParams.token || !photo) return;
     setAttendanceBusy(true);
     setMessage('');
     try {
-      await checkInAttendance(attendanceParams.sessionId, attendanceParams.token, profile);
+      await checkInAttendance(attendanceParams.sessionId, attendanceParams.token, pin, profile, photo.blob);
       setCheckInDone(true);
-      setMessage('Điểm danh thành công. Thời gian đã được ghi nhận trên Firestore.');
+      setMessage('Điểm danh thành công. Ảnh đã được lưu để hậu kiểm.');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Không thể điểm danh.');
-    } finally {
-      setAttendanceBusy(false);
-    }
+    } finally { setAttendanceBusy(false); }
   }
 
   return (
@@ -137,34 +190,24 @@ function App() {
         <div>
           <span className="eyebrow">IT006.Q24 · CUONGTV CLASSROOM</span>
           <h1>Kiến trúc máy tính — học kỳ 2, năm học 2025–2026</h1>
-          <p>
-            Đăng nhập Google, kiểm tra roster Firestore, điểm danh QR, làm bài trực tuyến
-            và xuất bảng điểm.
-          </p>
+          <p>Đăng nhập Google, kiểm tra roster, điểm danh QR động và lưu ảnh để hậu kiểm.</p>
           <div className="actions">
             {user ? (
               <>
                 <button type="button" onClick={() => void logout()}>Đăng xuất</button>
-                <span>
-                  {loadingProfile ? 'Đang kiểm tra danh sách lớp…' : profile
-                    ? `${profile.fullName || profile.email} · ${profile.role === 'admin' ? 'Quản trị viên' : 'Sinh viên'}`
-                    : user.email}
-                </span>
+                <span>{loadingProfile ? 'Đang kiểm tra danh sách lớp…' : profile ? `${profile.fullName || profile.email} · ${profile.role === 'admin' ? 'Quản trị viên' : 'Sinh viên'}` : user.email}</span>
               </>
-            ) : (
-              <button type="button" onClick={() => void handleLogin()}>Đăng nhập bằng Google</button>
-            )}
+            ) : <button type="button" onClick={() => void handleLogin()}>Đăng nhập bằng Google</button>}
             <a href="#modules">Xem chức năng</a>
           </div>
           {message && <p className="notice">{message}</p>}
         </div>
-
         <aside className="status-card">
           <strong>Trạng thái hệ thống</strong>
           <dl>
             <div><dt>Lớp</dt><dd>IT006.Q24</dd></div>
-            <div><dt>Roster</dt><dd>58 tài khoản</dd></div>
-            <div><dt>Xác thực</dt><dd>Google</dd></div>
+            <div><dt>QR rotation</dt><dd>60 giây</dd></div>
+            <div><dt>Session</dt><dd>5 phút</dd></div>
             <div><dt>Firebase</dt><dd>{firebaseConfigured ? 'Đã cấu hình' : 'Chờ cấu hình'}</dd></div>
           </dl>
         </aside>
@@ -174,33 +217,24 @@ function App() {
         <section className="workflow dashboard-panel">
           <span className="panel-label">ADMIN DASHBOARD</span>
           <h2>Xin chào, {profile.fullName || 'Giảng viên'}</h2>
-          <div className="profile-grid">
-            <div><strong>Email</strong><span>{profile.email}</span></div>
-            <div><strong>Lớp</strong><span>{profile.classCode}</span></div>
-            <div><strong>Vai trò</strong><span>Quản trị viên</span></div>
-          </div>
-
           <div className="attendance-box">
-            <h3>Mở phiên điểm danh</h3>
+            <h3>Điểm danh QR + PIN + ảnh hậu kiểm</h3>
             {!attendanceSession ? (
               <div className="attendance-controls">
-                <input
-                  value={attendanceTitle}
-                  onChange={(event) => setAttendanceTitle(event.target.value)}
-                  aria-label="Tên phiên điểm danh"
-                />
+                <input value={attendanceTitle} onChange={(event) => setAttendanceTitle(event.target.value)} aria-label="Tên phiên điểm danh" />
                 <button type="button" disabled={attendanceBusy} onClick={() => void handleOpenAttendance()}>
-                  {attendanceBusy ? 'Đang mở…' : 'Mở phiên 10 phút'}
+                  {attendanceBusy ? 'Đang mở…' : 'Mở phiên 5 phút'}
                 </button>
               </div>
             ) : (
               <div className="qr-panel">
                 <div>
                   <strong>{attendanceSession.title}</strong>
+                  <p>PIN hiện tại: <b className="pin-code">{attendanceSession.pin}</b></p>
+                  <p>QR và PIN tự đổi mỗi 60 giây.</p>
+                  <p>Đã điểm danh: <b>{attendanceCount}</b></p>
                   <p>Hết hạn lúc {attendanceSession.expiresAt.toDate().toLocaleTimeString('vi-VN')}</p>
-                  <button type="button" disabled={attendanceBusy} onClick={() => void handleCloseAttendance()}>
-                    Đóng phiên
-                  </button>
+                  <button type="button" disabled={attendanceBusy} onClick={() => void handleCloseAttendance()}>Đóng phiên</button>
                 </div>
                 {qrDataUrl && <img src={qrDataUrl} alt="QR điểm danh" />}
               </div>
@@ -220,36 +254,31 @@ function App() {
           </div>
 
           {attendanceParams.sessionId && attendanceParams.token && (
-            <div className="attendance-box">
-              <h3>Điểm danh buổi học</h3>
-              <p>Mã QR đã được nhận. Nhấn nút bên dưới để xác nhận bằng tài khoản Google hiện tại.</p>
-              <button
-                type="button"
-                disabled={attendanceBusy || checkInDone}
-                onClick={() => void handleCheckIn()}
-              >
-                {checkInDone ? 'Đã điểm danh' : attendanceBusy ? 'Đang ghi nhận…' : 'Xác nhận điểm danh'}
-              </button>
+            <div className="attendance-box camera-box">
+              <h3>Xác nhận điểm danh</h3>
+              <label>Mã PIN đang hiển thị trong lớp</label>
+              <input inputMode="numeric" maxLength={4} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="0000" />
+              <video ref={videoRef} muted playsInline className={cameraStream ? 'camera-preview active' : 'camera-preview'} />
+              {photo && <img className="photo-preview" src={photo.previewUrl} alt="Ảnh điểm danh đã chụp" />}
+              <div className="attendance-controls">
+                {!cameraStream && !photo && <button type="button" onClick={() => void handleStartCamera()}>Mở camera trước</button>}
+                {cameraStream && <button type="button" onClick={() => void handleCapturePhoto()}>Chụp ảnh</button>}
+                {photo && !checkInDone && <button type="button" onClick={() => { URL.revokeObjectURL(photo.previewUrl); setPhoto(null); }}>Chụp lại</button>}
+                <button type="button" disabled={attendanceBusy || checkInDone || pin.length !== 4 || !photo} onClick={() => void handleCheckIn()}>
+                  {checkInDone ? 'Đã điểm danh' : attendanceBusy ? 'Đang tải ảnh…' : 'Gửi điểm danh'}
+                </button>
+              </div>
+              <p className="privacy-note">Ảnh chỉ dùng để hậu kiểm điểm danh và không được nhận diện tự động trong MVP này.</p>
             </div>
           )}
         </section>
       )}
 
       <section id="modules" className="modules">
-        {modules.map((module) => (
-          <article key={module.title}>
-            <span>{module.status}</span>
-            <h2>{module.title}</h2>
-            <p>{module.detail}</p>
-          </article>
-        ))}
+        {modules.map((module) => <article key={module.title}><span>{module.status}</span><h2>{module.title}</h2><p>{module.detail}</p></article>)}
       </section>
     </main>
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
