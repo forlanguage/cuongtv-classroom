@@ -33,5 +33,26 @@ if (duplicateStudentEmails.length > 0) {
   throw new Error(`Duplicate student emails: ${[...new Set(duplicateStudentEmails)].join(', ')}`);
 }
 
+const accessRoster = [
+  ...systemUsers.map((user) => ({
+    email: user.email.toLowerCase(),
+    role: user.role,
+    displayName: user.display_name,
+    source: user.source || 'system',
+  })),
+  ...students.map((student) => ({
+    email: student.email.toLowerCase(),
+    role: 'student',
+    studentId: student.student_id,
+    displayName: student.full_name,
+    classCode: student.class_code,
+    source: 'class-roster',
+  })),
+];
+
+fs.mkdirSync('.generated', { recursive: true });
+fs.writeFileSync('.generated/access-roster.json', `${JSON.stringify(accessRoster, null, 2)}\n`);
+
 console.log(`Roster valid: ${students.length} class students + ${systemUsers.length} fixed identities.`);
+console.log(`Generated ${accessRoster.length} access records in .generated/access-roster.json.`);
 console.log('All users must authenticate through Google before role resolution.');
