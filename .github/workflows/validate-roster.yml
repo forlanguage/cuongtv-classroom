@@ -25,5 +25,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Validate roster and fixed identities
+      - name: Validate and generate merged roster
         run: node scripts/validate-roster.mjs
+      - name: Upload merged access roster
+        uses: actions/upload-artifact@v4
+        with:
+          name: classroom-access-roster
+          path: .generated/access-roster.json
+          if-no-files-found: error
