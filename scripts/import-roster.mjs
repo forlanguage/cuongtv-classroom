@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import process from 'node:process';
-import admin from 'firebase-admin';
+import { cert, initializeApp } from 'firebase-admin/app';
+import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 
 const COURSE_ID = process.env.COURSE_ID || 'IT006.Q24';
 const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -10,8 +11,8 @@ if (!serviceAccountJson) {
 }
 
 const serviceAccount = JSON.parse(serviceAccountJson);
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-const db = admin.firestore();
+initializeApp({ credential: cert(serviceAccount) });
+const db = getFirestore();
 
 function parseCsv(path) {
   const text = fs.readFileSync(path, 'utf8').trim();
@@ -56,7 +57,7 @@ await courseRef.set({
   semester: '2',
   academicYear: '2025-2026',
   rosterCount: records.length,
-  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  updatedAt: FieldValue.serverTimestamp(),
 }, { merge: true });
 
 let batch = db.batch();
@@ -68,7 +69,7 @@ for (const record of records) {
   batch.set(ref, {
     ...record,
     active: true,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   }, { merge: true });
   batchSize += 1;
   written += 1;
