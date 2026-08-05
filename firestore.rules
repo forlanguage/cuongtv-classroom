@@ -28,6 +28,10 @@ service cloud.firestore {
         && get(rosterPath(courseId)).data.role == 'student';
     }
 
+    function sessionPath(courseId, sessionId) {
+      return /databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId);
+    }
+
     match /courses/{courseId} {
       allow read: if signedIn();
       allow write: if isAdmin();
@@ -50,10 +54,17 @@ service cloud.firestore {
           allow create: if isActiveStudent(courseId)
             && normalizedEmail() == email
             && request.resource.data.email == normalizedEmail()
+            && request.resource.data.uid == request.auth.uid
             && request.resource.data.status == 'present'
-            && request.resource.data.token == get(/databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId)).data.token
-            && get(/databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId)).data.status == 'open'
-            && request.time < get(/databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId)).data.expiresAt;
+            && request.resource.data.reviewStatus == 'not_reviewed'
+            && request.resource.data.token == get(sessionPath(courseId, sessionId)).data.token
+            && request.resource.data.pin == get(sessionPath(courseId, sessionId)).data.pin
+            && request.resource.data.slot == get(sessionPath(courseId, sessionId)).data.slot
+            && request.resource.data.photoPath == 'attendance/' + courseId + '/' + sessionId + '/' + request.auth.uid + '.jpg'
+            && request.resource.data.photoSize > 0
+            && request.resource.data.photoSize <= 500 * 1024
+            && get(sessionPath(courseId, sessionId)).data.status == 'open'
+            && request.time < get(sessionPath(courseId, sessionId)).data.expiresAt;
           allow update, delete: if isAdmin();
         }
       }
