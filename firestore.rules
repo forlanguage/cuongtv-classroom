@@ -60,11 +60,45 @@ service cloud.firestore {
             && request.resource.data.token == get(sessionPath(courseId, sessionId)).data.token
             && request.resource.data.pin == get(sessionPath(courseId, sessionId)).data.pin
             && request.resource.data.slot == get(sessionPath(courseId, sessionId)).data.slot
-            && request.resource.data.photoPath == 'attendance/' + courseId + '/' + sessionId + '/' + request.auth.uid + '.jpg'
+            && request.resource.data.photoProvider == 'google-drive'
+            && request.resource.data.photoFileId is string
+            && request.resource.data.photoFileId.size() > 5
             && request.resource.data.photoSize > 0
             && request.resource.data.photoSize <= 500 * 1024
             && get(sessionPath(courseId, sessionId)).data.status == 'open'
             && request.time < get(sessionPath(courseId, sessionId)).data.expiresAt;
+          allow update, delete: if isAdmin();
+        }
+      }
+
+      match /assignments/{assignmentId} {
+        allow read: if isAdmin() || isActiveStudent(courseId);
+        allow write: if isAdmin();
+
+        match /submissions/{email} {
+          allow read: if isAdmin()
+            || (isActiveStudent(courseId) && normalizedEmail() == email);
+          allow create: if isActiveStudent(courseId)
+            && normalizedEmail() == email
+            && request.resource.data.email == normalizedEmail()
+            && request.resource.data.uid == request.auth.uid
+            && request.resource.data.status == 'submitted'
+            && request.resource.data.contentSha256 is string
+            && request.resource.data.contentSha256.size() == 64
+            && request.resource.data.mcqScore is number
+            && request.resource.data.essayGradingStatus == 'pending'
+            && request.resource.data.evidenceStatus in ['pending', 'ready'];
+          allow update: if isActiveStudent(courseId)
+            && normalizedEmail() == email
+            && resource.data.email == request.resource.data.email
+            && resource.data.uid == request.resource.data.uid
+            && resource.data.submissionId == request.resource.data.submissionId
+            && resource.data.contentSha256 == request.resource.data.contentSha256
+            && resource.data.status == 'submitted'
+            && request.resource.data.status == 'submitted'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'evidenceStatus', 'evidence', 'receiptEmail', 'updatedAt'
+            ]);
           allow update, delete: if isAdmin();
         }
       }
