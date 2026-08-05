@@ -1,11 +1,19 @@
-courseId: SAMPLE-2026-HK1
-courseName: Classroom Template
-semester: 2026-HK1
+courseId: IT006.Q24-2025-2026-HK2
+courseCode: IT006
+courseName: Kiến trúc máy tính
+classCode: IT006.Q24
+semester: 2
+academicYear: 2025-2026
+instructor:
+  name: Trương Văn Cương
+  email: cuongtv@uit.edu.vn
+  employeeId: "80349"
+admins:
+  - cuongtv@uit.edu.vn
 timezone: Asia/Ho_Chi_Minh
 allowedEmailDomains:
   - gm.uit.edu.vn
-classCodes:
-  - SAMPLE.Q01
+  - uit.edu.vn
 features:
   attendance: true
   assignments: true
