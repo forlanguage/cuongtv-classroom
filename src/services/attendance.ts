@@ -4,7 +4,6 @@ import {
   doc,
   onSnapshot,
   serverTimestamp,
-  setDoc,
   updateDoc,
   writeBatch,
   type Unsubscribe,
@@ -29,16 +28,8 @@ export interface AttendanceSession {
   openedAt?: Timestamp;
 }
 
-export interface AttendanceAdminState extends AttendanceSession {
-  pin: string;
-}
-
-export interface AttendanceClaim {
-  claimId: string;
-  sessionId: string;
-  sessionTitle: string;
-  expiresAt: string;
-}
+export interface AttendanceAdminState extends AttendanceSession { pin: string; }
+export interface AttendanceClaim { claimId: string; sessionId: string; sessionTitle: string; expiresAt: string; }
 
 interface GatewayResponse {
   ok: boolean;
@@ -47,10 +38,6 @@ interface GatewayResponse {
   sessionId?: string;
   sessionTitle?: string;
   expiresAt?: string;
-  fileId?: string;
-  fileName?: string;
-  downloadUrl?: string;
-  checkedInAt?: string;
 }
 
 function randomId(bytesLength = 18): string {
@@ -63,8 +50,7 @@ function randomPin(): string {
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
-  const buffer = await blob.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
+  const bytes = new Uint8Array(await blob.arrayBuffer());
   let binary = '';
   for (let offset = 0; offset < bytes.length; offset += 0x8000) {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
@@ -75,12 +61,7 @@ async function blobToBase64(blob: Blob): Promise<string> {
 async function callGateway(payload: Record<string, unknown>, retries = 0): Promise<GatewayResponse> {
   if (!appsScriptUrl) throw new Error('Chưa cấu hình VITE_APPS_SCRIPT_URL.');
   if (!auth?.currentUser) throw new Error('Phiên đăng nhập đã hết hạn.');
-
-  const request = {
-    ...payload,
-    idToken: await auth.currentUser.getIdToken(),
-  };
-
+  const request = { ...payload, idToken: await auth.currentUser.getIdToken() };
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
@@ -96,8 +77,7 @@ async function callGateway(payload: Record<string, unknown>, retries = 0): Promi
     } catch (error) {
       lastError = error instanceof Error ? error : new Error('Lỗi mạng không xác định.');
       if (attempt < retries) {
-        const delay = (2 ** attempt) * 1000 + Math.floor(Math.random() * 1500);
-        await new Promise((resolve) => window.setTimeout(resolve, delay));
+        await new Promise((resolve) => window.setTimeout(resolve, (2 ** attempt) * 1000 + Math.random() * 1200));
       }
     }
   }
@@ -109,53 +89,29 @@ export async function openAttendanceSession(title: string): Promise<AttendanceAd
   const id = crypto.randomUUID();
   const pin = randomPin();
   const currentChallengeId = randomId();
-  const slot = 0;
   const now = Date.now();
   const expiresAt = Timestamp.fromMillis(now + SESSION_DURATION_MINUTES * 60_000);
   const challengeExpiresAt = Timestamp.fromMillis(now + QR_ROTATION_MS);
   const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', id);
-  const secretRef = doc(sessionRef, 'private', 'config');
   const batch = writeBatch(db);
   batch.set(sessionRef, {
-    title: title.trim() || 'Điểm danh trên lớp',
-    status: 'open',
-    slot,
-    currentChallengeId,
-    challengeExpiresAt,
-    rotationMs: QR_ROTATION_MS,
-    openedAt: serverTimestamp(),
-    expiresAt,
+    title: title.trim() || 'Điểm danh trên lớp', status: 'open', slot: 0,
+    currentChallengeId, challengeExpiresAt, rotationMs: QR_ROTATION_MS,
+    openedAt: serverTimestamp(), expiresAt,
   });
-  batch.set(secretRef, { pin, updatedAt: serverTimestamp() });
+  batch.set(doc(sessionRef, 'private', 'config'), { pin, updatedAt: serverTimestamp() });
   await batch.commit();
-  return {
-    id,
-    title: title.trim() || 'Điểm danh trên lớp',
-    status: 'open',
-    slot,
-    currentChallengeId,
-    challengeExpiresAt,
-    expiresAt,
-    pin,
-  };
+  return { id, title: title.trim() || 'Điểm danh trên lớp', status: 'open', slot: 0, currentChallengeId, challengeExpiresAt, expiresAt, pin };
 }
 
-export async function rotateAttendanceChallenge(
-  sessionId: string,
-  slot: number,
-): Promise<{ currentChallengeId: string; challengeExpiresAt: Timestamp; pin: string }> {
+export async function rotateAttendanceChallenge(sessionId: string, slot: number): Promise<{ currentChallengeId: string; challengeExpiresAt: Timestamp; pin: string }> {
   if (!db) throw new Error('Firestore chưa được cấu hình.');
   const currentChallengeId = randomId();
   const pin = randomPin();
   const challengeExpiresAt = Timestamp.fromMillis(Date.now() + QR_ROTATION_MS);
   const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId);
   const batch = writeBatch(db);
-  batch.update(sessionRef, {
-    currentChallengeId,
-    challengeExpiresAt,
-    slot,
-    rotatedAt: serverTimestamp(),
-  });
+  batch.update(sessionRef, { currentChallengeId, challengeExpiresAt, slot, rotatedAt: serverTimestamp() });
   batch.set(doc(sessionRef, 'private', 'config'), { pin, updatedAt: serverTimestamp() }, { merge: true });
   await batch.commit();
   return { currentChallengeId, challengeExpiresAt, pin };
@@ -163,87 +119,45 @@ export async function rotateAttendanceChallenge(
 
 export async function closeAttendanceSession(sessionId: string): Promise<void> {
   if (!db) throw new Error('Firestore chưa được cấu hình.');
-  await updateDoc(doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId), {
-    status: 'closed',
-    closedAt: serverTimestamp(),
-  });
+  await updateDoc(doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId), { status: 'closed', closedAt: serverTimestamp() });
 }
 
-export async function claimAttendanceChallenge(
-  sessionId: string,
-  challengeId: string,
-  profile: AccessProfile,
-): Promise<AttendanceClaim> {
-  const result = await callGateway({
-    action: 'claimAttendanceChallenge',
-    courseId: ACTIVE_COURSE_ID,
-    sessionId,
-    challengeId,
-    email: profile.email,
-  }, 1);
-
-  if (!result.claimId || !result.sessionId || !result.sessionTitle || !result.expiresAt) {
-    throw new Error('Backend không trả về claim hợp lệ.');
-  }
-  return {
-    claimId: result.claimId,
-    sessionId: result.sessionId,
-    sessionTitle: result.sessionTitle,
-    expiresAt: result.expiresAt,
-  };
+export async function claimAttendanceChallenge(sessionId: string, challengeId: string, profile: AccessProfile): Promise<AttendanceClaim> {
+  const result = await callGateway({ action: 'claimAttendanceChallenge', courseId: ACTIVE_COURSE_ID, sessionId, challengeId, email: profile.email }, 1);
+  if (!result.claimId || !result.sessionId || !result.sessionTitle || !result.expiresAt) throw new Error('Backend không trả về claim hợp lệ.');
+  return { claimId: result.claimId, sessionId: result.sessionId, sessionTitle: result.sessionTitle, expiresAt: result.expiresAt };
 }
 
-export async function completeAttendanceClaim(
-  claim: AttendanceClaim,
-  pin: string,
-  profile: AccessProfile,
-  photo: Blob,
-  requestId: string,
-): Promise<void> {
+export async function completeAttendanceClaim(claim: AttendanceClaim, pin: string, profile: AccessProfile, photo: Blob, requestId: string): Promise<void> {
   await callGateway({
-    action: 'completeAttendance',
-    courseId: ACTIVE_COURSE_ID,
-    claimId: claim.claimId,
-    requestId,
-    pin: pin.trim(),
-    email: profile.email,
-    studentId: profile.studentId || 'TEST-STUDENT',
-    fullName: profile.fullName,
-    classCode: profile.classCode,
-    mimeType: 'image/jpeg',
-    photoSize: photo.size,
+    action: 'completeAttendance', courseId: ACTIVE_COURSE_ID, claimId: claim.claimId,
+    requestId, pin: pin.trim(), email: profile.email,
+    studentId: profile.studentId || 'TEST-STUDENT', fullName: profile.fullName,
+    classCode: profile.classCode, mimeType: 'image/jpeg', photoSize: photo.size,
     fileBase64: await blobToBase64(photo),
   }, 3);
 }
 
-export function observeOpenAttendanceSessions(
-  callback: (sessions: AttendanceSession[]) => void,
-): Unsubscribe {
-  if (!db) {
-    callback([]);
-    return () => undefined;
-  }
-  return onSnapshot(
-    collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'),
-    (snapshot) => {
-      const now = Date.now();
-      callback(snapshot.docs
-        .map((item) => ({ id: item.id, ...item.data() } as AttendanceSession))
-        .filter((session) => session.status === 'open'
-          && session.expiresAt instanceof Timestamp
-          && session.expiresAt.toMillis() > now)
-        .sort((a, b) => b.expiresAt.toMillis() - a.expiresAt.toMillis()));
-    },
-  );
+export async function recordAttendanceByPin(sessionId: string, pin: string, profile: AccessProfile): Promise<void> {
+  await callGateway({
+    action: 'recordAttendanceByPin', courseId: ACTIVE_COURSE_ID, sessionId,
+    requestId: crypto.randomUUID(), pin: pin.trim(), email: profile.email,
+    studentId: profile.studentId || 'TEST-STUDENT', fullName: profile.fullName,
+    classCode: profile.classCode,
+  }, 2);
+}
+
+export function observeOpenAttendanceSessions(callback: (sessions: AttendanceSession[]) => void): Unsubscribe {
+  if (!db) { callback([]); return () => undefined; }
+  return onSnapshot(collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'), (snapshot) => {
+    const now = Date.now();
+    callback(snapshot.docs.map((item) => ({ id: item.id, ...item.data() } as AttendanceSession))
+      .filter((session) => session.status === 'open' && session.expiresAt instanceof Timestamp && session.expiresAt.toMillis() > now)
+      .sort((a, b) => b.expiresAt.toMillis() - a.expiresAt.toMillis()));
+  });
 }
 
 export function observeAttendanceCount(sessionId: string, callback: (count: number) => void): Unsubscribe {
-  if (!db) {
-    callback(0);
-    return () => undefined;
-  }
-  return onSnapshot(
-    collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records'),
-    (snapshot) => callback(snapshot.size),
-  );
+  if (!db) { callback(0); return () => undefined; }
+  return onSnapshot(collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records'), (snapshot) => callback(snapshot.size));
 }
