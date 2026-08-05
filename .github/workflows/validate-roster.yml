@@ -1,0 +1,29 @@
+name: Validate Classroom Roster
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'course/**'
+      - 'scripts/validate-roster.mjs'
+      - '.github/workflows/validate-roster.yml'
+  pull_request:
+    paths:
+      - 'course/**'
+      - 'scripts/validate-roster.mjs'
+      - '.github/workflows/validate-roster.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate roster and fixed identities
+        run: node scripts/validate-roster.mjs
