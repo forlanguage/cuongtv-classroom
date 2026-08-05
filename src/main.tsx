@@ -8,12 +8,15 @@ import { loginWithGoogle, logout, observeAuth } from './services/auth';
 import { loadAccessProfile, type AccessProfile } from './services/roster';
 import {
   QR_ROTATION_MS,
-  checkInAttendance,
+  claimAttendanceChallenge,
   closeAttendanceSession,
+  completeAttendanceClaim,
   observeAttendanceCount,
   observeOpenAttendanceSessions,
   openAttendanceSession,
-  rotateAttendanceCode,
+  rotateAttendanceChallenge,
+  type AttendanceAdminState,
+  type AttendanceClaim,
   type AttendanceSession,
 } from './services/attendance';
 import {
@@ -25,13 +28,12 @@ import {
 
 const modules = [
   { title: 'Đăng ký lớp', detail: 'Xác thực Google và đối chiếu roster Firestore.', status: 'Hoàn thành' },
-  { title: 'Điểm danh QR', detail: 'Chọn phiên, quét QR, nhập PIN và chụp ảnh hậu kiểm.', status: 'MVP 2' },
+  { title: 'Điểm danh QR', detail: 'Challenge ngắn hạn, claim một lần, PIN và ảnh hậu kiểm.', status: 'MVP 3' },
   { title: 'Bài tập trên lớp', detail: 'Trắc nghiệm, tự luận, lưu nháp và nộp bài.', status: 'Kế hoạch' },
   { title: 'Chấm điểm', detail: 'Chấm tự động, AI gợi ý và giảng viên duyệt.', status: 'Kế hoạch' },
 ];
 
-type StudentAttendanceStep = 'list' | 'scan' | 'pin' | 'photo' | 'done';
-
+type StudentStep = 'list' | 'scan' | 'pin' | 'photo' | 'done';
 type BarcodeDetectorInstance = {
   detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>>;
 };
@@ -47,20 +49,21 @@ function App() {
   const [profile, setProfile] = useState<AccessProfile | null>(null);
   const [loadingProfile, setLoadingProfile] = useState(false);
   const [message, setMessage] = useState('');
+
   const [attendanceTitle, setAttendanceTitle] = useState('Điểm danh trên lớp');
-  const [attendanceSession, setAttendanceSession] = useState<AttendanceSession | null>(null);
+  const [adminSession, setAdminSession] = useState<AttendanceAdminState | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState('');
-  const [attendanceBusy, setAttendanceBusy] = useState(false);
   const [attendanceCount, setAttendanceCount] = useState(0);
+  const [attendanceBusy, setAttendanceBusy] = useState(false);
 
   const [openSessions, setOpenSessions] = useState<AttendanceSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<AttendanceSession | null>(null);
-  const [studentStep, setStudentStep] = useState<StudentAttendanceStep>('list');
-  const [scannedToken, setScannedToken] = useState('');
+  const [claim, setClaim] = useState<AttendanceClaim | null>(null);
+  const [studentStep, setStudentStep] = useState<StudentStep>('list');
   const [pin, setPin] = useState('');
   const [photo, setPhoto] = useState<CapturedPhoto | null>(null);
+  const [requestId, setRequestId] = useState('');
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
-  const [scannerActive, setScannerActive] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const scanTimerRef = useRef<number | null>(null);
 
@@ -103,38 +106,37 @@ function App() {
   }, [cameraStream]);
 
   useEffect(() => {
-    if (!attendanceSession) return;
-    return observeAttendanceCount(attendanceSession.id, setAttendanceCount);
-  }, [attendanceSession]);
+    if (!adminSession) return;
+    return observeAttendanceCount(adminSession.id, setAttendanceCount);
+  }, [adminSession]);
 
   useEffect(() => {
-    if (!attendanceSession) return;
-    let slot = attendanceSession.slot;
+    if (!adminSession) return;
+    let slot = adminSession.slot;
     const timer = window.setInterval(() => {
       slot += 1;
       void (async () => {
         try {
-          const next = await rotateAttendanceCode(attendanceSession.id, slot);
-          const updated = { ...attendanceSession, ...next, slot };
-          const url = new URL(window.location.href);
-          url.searchParams.set('attendanceSession', updated.id);
-          url.searchParams.set('token', updated.token);
+          const next = await rotateAttendanceChallenge(adminSession.id, slot);
+          const updated = { ...adminSession, ...next, slot };
+          const url = new URL(window.location.origin + window.location.pathname);
+          url.searchParams.set('challenge', updated.currentChallengeId);
           setQrDataUrl(await QRCode.toDataURL(url.toString(), { width: 320, margin: 2 }));
-          setAttendanceSession(updated);
+          setAdminSession(updated);
         } catch (error) {
-          setMessage(error instanceof Error ? error.message : 'Không thể đổi mã điểm danh.');
+          setMessage(error instanceof Error ? error.message : 'Không thể đổi challenge điểm danh.');
         }
       })();
     }, QR_ROTATION_MS);
     return () => window.clearInterval(timer);
-  }, [attendanceSession?.id]);
+  }, [adminSession?.id]);
 
-  async function waitForVideoElement(): Promise<HTMLVideoElement> {
+  async function waitForVideo(): Promise<HTMLVideoElement> {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       if (videoRef.current) return videoRef.current;
       await new Promise((resolve) => window.setTimeout(resolve, 25));
     }
-    throw new Error('Không thể khởi tạo vùng xem camera.');
+    throw new Error('Không thể khởi tạo vùng camera.');
   }
 
   async function handleLogin() {
@@ -148,27 +150,30 @@ function App() {
     setMessage('');
     try {
       const session = await openAttendanceSession(attendanceTitle);
-      const url = new URL(window.location.href);
-      url.searchParams.set('attendanceSession', session.id);
-      url.searchParams.set('token', session.token);
+      const url = new URL(window.location.origin + window.location.pathname);
+      url.searchParams.set('challenge', session.currentChallengeId);
       setQrDataUrl(await QRCode.toDataURL(url.toString(), { width: 320, margin: 2 }));
-      setAttendanceSession(session);
+      setAdminSession(session);
       setAttendanceCount(0);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Không thể mở phiên điểm danh.');
-    } finally { setAttendanceBusy(false); }
+    } finally {
+      setAttendanceBusy(false);
+    }
   }
 
   async function handleCloseAttendance() {
-    if (!attendanceSession) return;
+    if (!adminSession) return;
     setAttendanceBusy(true);
     try {
-      await closeAttendanceSession(attendanceSession.id);
-      setAttendanceSession(null);
+      await closeAttendanceSession(adminSession.id);
+      setAdminSession(null);
       setQrDataUrl('');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Không thể đóng phiên điểm danh.');
-    } finally { setAttendanceBusy(false); }
+    } finally {
+      setAttendanceBusy(false);
+    }
   }
 
   function resetStudentFlow() {
@@ -176,32 +181,29 @@ function App() {
     if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current);
     if (photo) URL.revokeObjectURL(photo.previewUrl);
     setCameraStream(null);
-    setScannerActive(false);
     setSelectedSession(null);
-    setScannedToken('');
+    setClaim(null);
     setPin('');
     setPhoto(null);
+    setRequestId('');
     setStudentStep('list');
     setMessage('');
   }
 
   async function startQrScanner(session: AttendanceSession) {
+    if (!profile) return;
     if (!window.BarcodeDetector) {
-      setMessage('Trình duyệt chưa hỗ trợ quét QR trực tiếp. Hãy dùng Chrome mới nhất trên điện thoại.');
+      setMessage('Trình duyệt chưa hỗ trợ quét QR trực tiếp. Hãy dùng Chrome mới trên điện thoại.');
       return;
     }
-
     setSelectedSession(session);
     setStudentStep('scan');
     setMessage('');
     try {
-      const video = await waitForVideoElement();
-      stopCamera(cameraStream);
+      const video = await waitForVideo();
       const stream = await openRearCamera(video);
       setCameraStream(stream);
-      setScannerActive(true);
       const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
-
       const scanFrame = async () => {
         if (!videoRef.current || !stream.active) return;
         try {
@@ -209,24 +211,20 @@ function App() {
           const value = codes[0]?.rawValue;
           if (value) {
             const scannedUrl = new URL(value);
-            const sessionId = scannedUrl.searchParams.get('attendanceSession');
-            const token = scannedUrl.searchParams.get('token');
-            if (sessionId !== session.id || !token) {
-              throw new Error('QR không thuộc phiên điểm danh đã chọn.');
-            }
+            const challengeId = scannedUrl.searchParams.get('challenge');
+            if (!challengeId) throw new Error('QR không chứa challenge hợp lệ.');
+            const issuedClaim = await claimAttendanceChallenge(session.id, challengeId, profile);
             stopCamera(stream);
             setCameraStream(null);
-            setScannerActive(false);
-            setScannedToken(token);
+            setClaim(issuedClaim);
             setStudentStep('pin');
+            setMessage('QR hợp lệ. Claim cá nhân đã được cấp trong 3 phút.');
             return;
           }
         } catch (error) {
-          if (error instanceof Error && error.message.includes('không thuộc phiên')) {
-            setMessage(error.message);
-          }
+          setMessage(error instanceof Error ? error.message : 'Không thể xác minh QR.');
         }
-        scanTimerRef.current = window.setTimeout(() => void scanFrame(), 350);
+        scanTimerRef.current = window.setTimeout(() => void scanFrame(), 500);
       };
       void scanFrame();
     } catch (error) {
@@ -235,10 +233,11 @@ function App() {
   }
 
   async function handleOpenPhotoCamera() {
+    if (!claim || pin.length !== 4) return;
     setStudentStep('photo');
     setMessage('');
     try {
-      const video = await waitForVideoElement();
+      const video = await waitForVideo();
       stopCamera(cameraStream);
       setCameraStream(await openRearCamera(video));
     } catch (error) {
@@ -250,11 +249,9 @@ function App() {
     if (!videoRef.current || !profile) return;
     try {
       if (photo) URL.revokeObjectURL(photo.previewUrl);
-      const captured = await captureCompressedPhoto(
-        videoRef.current,
-        `${profile.studentId || profile.email} · IT006.Q24`,
-      );
+      const captured = await captureCompressedPhoto(videoRef.current, `${profile.studentId || profile.email} · IT006.Q24`);
       setPhoto(captured);
+      setRequestId(crypto.randomUUID());
       stopCamera(cameraStream);
       setCameraStream(null);
     } catch (error) {
@@ -263,16 +260,18 @@ function App() {
   }
 
   async function handleCheckIn() {
-    if (!profile || !selectedSession || !scannedToken || !photo) return;
+    if (!profile || !claim || !photo || !requestId) return;
     setAttendanceBusy(true);
-    setMessage('');
+    setMessage('Đang gửi ảnh; hệ thống sẽ tự thử lại nếu mạng chập chờn…');
     try {
-      await checkInAttendance(selectedSession.id, scannedToken, pin, profile, photo.blob);
+      await completeAttendanceClaim(claim, pin, profile, photo.blob, requestId);
       setStudentStep('done');
-      setMessage('Điểm danh thành công. Ảnh đã được lưu để hậu kiểm.');
+      setMessage('Điểm danh thành công. Claim đã được dùng và không thể phát lại.');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Không thể điểm danh.');
-    } finally { setAttendanceBusy(false); }
+      setMessage(error instanceof Error ? error.message : 'Không thể hoàn tất điểm danh. Bạn có thể bấm gửi lại khi claim còn hạn.');
+    } finally {
+      setAttendanceBusy(false);
+    }
   }
 
   return (
@@ -281,7 +280,7 @@ function App() {
         <div>
           <span className="eyebrow">IT006.Q24 · CUONGTV CLASSROOM</span>
           <h1>Kiến trúc máy tính — học kỳ 2, năm học 2025–2026</h1>
-          <p>Đăng nhập Google, kiểm tra roster, điểm danh QR động và lưu ảnh để hậu kiểm.</p>
+          <p>Đăng nhập Google, kiểm tra roster và điểm danh bằng challenge ngắn hạn, claim một lần.</p>
           <div className="actions">
             {user ? (
               <>
@@ -297,8 +296,8 @@ function App() {
           <strong>Trạng thái hệ thống</strong>
           <dl>
             <div><dt>Lớp</dt><dd>IT006.Q24</dd></div>
-            <div><dt>QR rotation</dt><dd>60 giây</dd></div>
-            <div><dt>Session</dt><dd>5 phút</dd></div>
+            <div><dt>QR challenge</dt><dd>60 giây</dd></div>
+            <div><dt>Claim cá nhân</dt><dd>3 phút</dd></div>
             <div><dt>Firebase</dt><dd>{firebaseConfigured ? 'Đã cấu hình' : 'Chờ cấu hình'}</dd></div>
           </dl>
         </aside>
@@ -309,25 +308,23 @@ function App() {
           <span className="panel-label">ADMIN DASHBOARD</span>
           <h2>Xin chào, {profile.fullName || 'Giảng viên'}</h2>
           <div className="attendance-box">
-            <h3>Điểm danh QR + PIN + ảnh hậu kiểm</h3>
-            {!attendanceSession ? (
+            <h3>Điểm danh challenge + PIN + ảnh hậu kiểm</h3>
+            {!adminSession ? (
               <div className="attendance-controls">
                 <input value={attendanceTitle} onChange={(event) => setAttendanceTitle(event.target.value)} aria-label="Tên phiên điểm danh" />
-                <button type="button" disabled={attendanceBusy} onClick={() => void handleOpenAttendance()}>
-                  {attendanceBusy ? 'Đang mở…' : 'Mở phiên 5 phút'}
-                </button>
+                <button type="button" disabled={attendanceBusy} onClick={() => void handleOpenAttendance()}>{attendanceBusy ? 'Đang mở…' : 'Mở phiên 5 phút'}</button>
               </div>
             ) : (
               <div className="qr-panel">
                 <div>
-                  <strong>{attendanceSession.title}</strong>
-                  <p>PIN hiện tại: <b className="pin-code">{attendanceSession.pin}</b></p>
-                  <p>QR và PIN tự đổi mỗi 60 giây.</p>
+                  <strong>{adminSession.title}</strong>
+                  <p>PIN hiện tại: <b className="pin-code">{adminSession.pin}</b></p>
+                  <p>QR và PIN đổi mỗi 60 giây. QR chỉ chứa challenge ID.</p>
                   <p>Đã điểm danh: <b>{attendanceCount}</b></p>
-                  <p>Hết hạn lúc {attendanceSession.expiresAt.toDate().toLocaleTimeString('vi-VN')}</p>
+                  <p>Hết hạn lúc {adminSession.expiresAt.toDate().toLocaleTimeString('vi-VN')}</p>
                   <button type="button" disabled={attendanceBusy} onClick={() => void handleCloseAttendance()}>Đóng phiên</button>
                 </div>
-                {qrDataUrl && <img src={qrDataUrl} alt="QR điểm danh" />}
+                {qrDataUrl && <img src={qrDataUrl} alt="QR challenge điểm danh" />}
               </div>
             )}
           </div>
@@ -343,77 +340,65 @@ function App() {
             <div><strong>Lớp</strong><span>{profile.classCode}</span></div>
             <div><strong>Email</strong><span>{profile.email}</span></div>
           </div>
-
           <div className="attendance-box camera-box">
             <div className="step-indicator">
               <span className={studentStep === 'list' ? 'active' : ''}>1. Chọn phiên</span>
               <span className={studentStep === 'scan' || studentStep === 'pin' ? 'active' : ''}>2. QR + PIN</span>
               <span className={studentStep === 'photo' || studentStep === 'done' ? 'active' : ''}>3. Chụp ảnh</span>
             </div>
-
             {studentStep === 'list' && (
               <>
                 <h3>Phiên điểm danh đang mở</h3>
-                {!openSessions.length ? (
-                  <p>Hiện chưa có phiên điểm danh nào.</p>
-                ) : (
+                {!openSessions.length ? <p>Hiện chưa có phiên điểm danh nào.</p> : (
                   <div className="session-list">
                     {openSessions.map((session) => (
-                      <button key={session.id} type="button" className="session-item" onClick={() => void startQrScanner(session)}>
+                      <button className="session-item" type="button" key={session.id} onClick={() => void startQrScanner(session)}>
                         <strong>{session.title}</strong>
-                        <span>Hết hạn lúc {session.expiresAt.toDate().toLocaleTimeString('vi-VN')}</span>
+                        <span>Hết hạn {session.expiresAt.toDate().toLocaleTimeString('vi-VN')}</span>
                       </button>
                     ))}
                   </div>
                 )}
               </>
             )}
-
-            {studentStep === 'scan' && selectedSession && (
+            {studentStep === 'scan' && (
               <>
-                <h3>Quét QR — {selectedSession.title}</h3>
-                <p>Hướng camera sau vào QR đang hiển thị trên màn hình giảng viên.</p>
-                <video ref={videoRef} muted playsInline className={scannerActive ? 'camera-preview active' : 'camera-preview'} />
-                <button type="button" className="secondary-button" onClick={resetStudentFlow}>Quay lại danh sách</button>
+                <h3>Quét QR của phiên “{selectedSession?.title}”</h3>
+                <video ref={videoRef} muted playsInline className="camera-preview active" />
+                <button type="button" onClick={resetStudentFlow}>Quay lại</button>
               </>
             )}
-
-            {studentStep === 'pin' && selectedSession && (
+            {studentStep === 'pin' && claim && (
               <>
-                <h3>Nhập PIN xác nhận</h3>
-                <p>QR hợp lệ. Nhập PIN 4 số đang hiển thị trong lớp.</p>
+                <h3>Nhập PIN đang hiển thị trong lớp</h3>
+                <p>Claim hết hạn lúc {new Date(claim.expiresAt).toLocaleTimeString('vi-VN')}.</p>
                 <input inputMode="numeric" maxLength={4} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="0000" />
                 <div className="attendance-controls">
-                  <button type="button" disabled={pin.length !== 4} onClick={() => void handleOpenPhotoCamera()}>Tiếp tục mở camera sau</button>
-                  <button type="button" className="secondary-button" onClick={resetStudentFlow}>Hủy</button>
+                  <button type="button" disabled={pin.length !== 4} onClick={() => void handleOpenPhotoCamera()}>Tiếp tục chụp ảnh</button>
+                  <button type="button" onClick={resetStudentFlow}>Hủy</button>
                 </div>
               </>
             )}
-
-            {studentStep === 'photo' && selectedSession && (
+            {studentStep === 'photo' && (
               <>
-                <h3>Chụp ảnh khuôn mặt</h3>
-                <p>Dùng camera sau để chụp ảnh rõ mặt trước khi gửi điểm danh.</p>
+                <h3>Chụp ảnh khuôn mặt bằng camera sau</h3>
                 <video ref={videoRef} muted playsInline className={cameraStream ? 'camera-preview active' : 'camera-preview'} />
                 {photo && <img className="photo-preview" src={photo.previewUrl} alt="Ảnh điểm danh đã chụp" />}
                 <div className="attendance-controls">
                   {cameraStream && <button type="button" onClick={() => void handleCapturePhoto()}>Chụp ảnh</button>}
-                  {photo && <button type="button" onClick={() => { URL.revokeObjectURL(photo.previewUrl); setPhoto(null); void handleOpenPhotoCamera(); }}>Chụp lại</button>}
-                  <button type="button" disabled={attendanceBusy || !photo} onClick={() => void handleCheckIn()}>
-                    {attendanceBusy ? 'Đang tải ảnh…' : 'Gửi điểm danh'}
-                  </button>
+                  {photo && !attendanceBusy && <button type="button" onClick={() => { URL.revokeObjectURL(photo.previewUrl); setPhoto(null); setRequestId(''); void handleOpenPhotoCamera(); }}>Chụp lại</button>}
+                  <button type="button" disabled={!photo || attendanceBusy} onClick={() => void handleCheckIn()}>{attendanceBusy ? 'Đang gửi và thử lại…' : 'Gửi điểm danh'}</button>
                 </div>
-                <p className="privacy-note">Ảnh chỉ dùng để hậu kiểm điểm danh và không được nhận diện tự động trong MVP này.</p>
               </>
             )}
-
             {studentStep === 'done' && (
               <>
-                <h3>Đã điểm danh thành công</h3>
-                <p>Hệ thống đã ghi nhận thời gian và lưu ảnh hậu kiểm.</p>
-                <button type="button" onClick={resetStudentFlow}>Về danh sách phiên</button>
+                <h3>Đã điểm danh</h3>
+                <p>Ảnh đã lưu trên Google Drive và receipt được backend ghi vào Firestore.</p>
+                <button type="button" onClick={resetStudentFlow}>Về danh sách</button>
               </>
             )}
+            <p className="privacy-note">Ảnh chỉ dùng để hậu kiểm; MVP không thực hiện nhận diện khuôn mặt tự động.</p>
           </div>
         </section>
       )}
