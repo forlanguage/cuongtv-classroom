@@ -16,6 +16,18 @@ service cloud.firestore {
         && normalizedEmail() == 'cuongtv@uit.edu.vn';
     }
 
+    function rosterPath(courseId) {
+      return /databases/$(database)/documents/courses/$(courseId)/roster/$(normalizedEmail());
+    }
+
+    function isActiveStudent(courseId) {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && exists(rosterPath(courseId))
+        && get(rosterPath(courseId)).data.active == true
+        && get(rosterPath(courseId)).data.role == 'student';
+    }
+
     match /courses/{courseId} {
       allow read: if signedIn();
       allow write: if isAdmin();
@@ -26,6 +38,24 @@ service cloud.firestore {
             && request.auth.token.email_verified == true
             && normalizedEmail() == email);
         allow write: if isAdmin();
+      }
+
+      match /attendanceSessions/{sessionId} {
+        allow read: if isAdmin() || isActiveStudent(courseId);
+        allow create, update, delete: if isAdmin();
+
+        match /records/{email} {
+          allow read: if isAdmin()
+            || (isActiveStudent(courseId) && normalizedEmail() == email);
+          allow create: if isActiveStudent(courseId)
+            && normalizedEmail() == email
+            && request.resource.data.email == normalizedEmail()
+            && request.resource.data.status == 'present'
+            && request.resource.data.token == get(/databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId)).data.token
+            && get(/databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId)).data.status == 'open'
+            && request.time < get(/databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId)).data.expiresAt;
+          allow update, delete: if isAdmin();
+        }
       }
 
       match /{document=**} {
