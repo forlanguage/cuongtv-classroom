@@ -1,0 +1,34 @@
+name: Import Firestore Roster
+
+on:
+  workflow_dispatch:
+    inputs:
+      course_id:
+        description: Firestore course document ID
+        required: true
+        default: IT006.Q24
+
+permissions:
+  contents: read
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Firebase Admin SDK
+        run: npm install --no-save firebase-admin
+
+      - name: Validate roster
+        run: node scripts/validate-roster.mjs
+
+      - name: Import roster into Firestore
+        run: node scripts/import-roster.mjs
+        env:
+          COURSE_ID: ${{ inputs.course_id }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
