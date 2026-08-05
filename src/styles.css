@@ -17,6 +17,7 @@ h1 { margin: 14px 0 18px; max-width: 780px; font-size: clamp(2.3rem, 6vw, 5rem);
 .actions { display: flex; gap: 18px; align-items: center; margin-top: 28px; flex-wrap: wrap; }
 button { border: 0; border-radius: 999px; padding: 13px 20px; color: #082f49; background: #7dd3fc; font-weight: 800; cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .6; }
+.secondary-button { color: #cbd5e1; background: #1e293b; }
 input { width: min(100%, 360px); border: 1px solid #334155; border-radius: 14px; padding: 13px 15px; color: #e2e8f0; background: #020617; }
 a { color: #e2e8f0; text-underline-offset: 5px; }
 .status-card, article, .workflow { border: 1px solid #1e293b; background: rgba(15, 23, 42, .72); border-radius: 24px; }
@@ -51,6 +52,13 @@ article p { margin: 0; color: #94a3b8; line-height: 1.6; }
 .camera-preview, .photo-preview { display: none; width: min(100%, 420px); aspect-ratio: 3 / 4; border: 1px solid #334155; border-radius: 18px; object-fit: cover; background: #020617; }
 .camera-preview.active, .photo-preview { display: block; }
 .privacy-note { margin-bottom: 0; font-size: .9rem; }
+.step-indicator { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 8px; }
+.step-indicator span { padding: 10px 12px; border: 1px solid #334155; border-radius: 12px; color: #64748b; text-align: center; font-size: .85rem; font-weight: 800; }
+.step-indicator span.active { border-color: #38bdf8; color: #e0f2fe; background: rgba(14, 165, 233, .14); }
+.session-list { display: grid; gap: 12px; }
+.session-item { width: 100%; display: flex; justify-content: space-between; gap: 18px; align-items: center; border: 1px solid #334155; border-radius: 16px; padding: 16px 18px; color: #e2e8f0; background: rgba(15, 23, 42, .8); text-align: left; }
+.session-item:hover { border-color: #38bdf8; }
+.session-item span { color: #94a3b8; font-weight: 600; }
 @media (max-width: 840px) {
   main { padding-top: 40px; }
   .hero { grid-template-columns: 1fr; }
@@ -63,4 +71,6 @@ article p { margin: 0; color: #94a3b8; line-height: 1.6; }
   .actions { align-items: flex-start; flex-direction: column; }
   .attendance-controls { align-items: stretch; flex-direction: column; }
   .attendance-controls button, .attendance-controls input { width: 100%; }
+  .step-indicator { grid-template-columns: 1fr; }
+  .session-item { align-items: flex-start; flex-direction: column; }
 }
