@@ -34,7 +34,6 @@ article p { margin: 0; color: #94a3b8; line-height: 1.6; }
 .workflow { padding: 28px; }
 .workflow h2 { margin: 8px 0 10px; }
 .dashboard-panel { margin-top: 38px; }
-.dashboard-panel > p { margin: 0; color: #94a3b8; line-height: 1.7; }
 .profile-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 24px; }
 .profile-grid div { display: grid; gap: 7px; padding: 18px; border: 1px solid #1e293b; border-radius: 16px; background: rgba(2, 6, 23, .42); }
 .profile-grid strong { color: #94a3b8; font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; }
@@ -45,6 +44,13 @@ article p { margin: 0; color: #94a3b8; line-height: 1.6; }
 .attendance-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .qr-panel { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 24px; }
 .qr-panel img { width: 240px; max-width: 100%; border-radius: 16px; background: white; padding: 10px; }
+.pin-code { display: inline-block; padding: 8px 14px; border-radius: 12px; color: #fef3c7; background: #78350f; font-size: 1.7rem; letter-spacing: .18em; }
+.camera-box { display: grid; gap: 14px; }
+.camera-box label { color: #cbd5e1; font-weight: 700; }
+.camera-box input { font-size: 1.35rem; letter-spacing: .25em; text-align: center; }
+.camera-preview, .photo-preview { display: none; width: min(100%, 420px); aspect-ratio: 3 / 4; border: 1px solid #334155; border-radius: 18px; object-fit: cover; background: #020617; }
+.camera-preview.active, .photo-preview { display: block; }
+.privacy-note { margin-bottom: 0; font-size: .9rem; }
 @media (max-width: 840px) {
   main { padding-top: 40px; }
   .hero { grid-template-columns: 1fr; }
@@ -55,4 +61,6 @@ article p { margin: 0; color: #94a3b8; line-height: 1.6; }
 @media (max-width: 520px) {
   .modules { grid-template-columns: 1fr; }
   .actions { align-items: flex-start; flex-direction: column; }
+  .attendance-controls { align-items: stretch; flex-direction: column; }
+  .attendance-controls button, .attendance-controls input { width: 100%; }
 }
