@@ -38,14 +38,12 @@ function randomPin(): string {
 
 export async function openAttendanceSession(title: string): Promise<AttendanceSession> {
   if (!db) throw new Error('Firestore chưa được cấu hình.');
-
   const id = crypto.randomUUID();
   const token = randomToken();
   const pin = randomPin();
   const slot = 0;
   const expiresAt = Timestamp.fromMillis(Date.now() + SESSION_DURATION_MINUTES * 60_000);
   const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', id);
-
   await setDoc(sessionRef, {
     title: title.trim() || 'Điểm danh trên lớp',
     token,
@@ -56,7 +54,6 @@ export async function openAttendanceSession(title: string): Promise<AttendanceSe
     openedAt: serverTimestamp(),
     expiresAt,
   });
-
   return { id, title: title.trim() || 'Điểm danh trên lớp', token, pin, slot, status: 'open', expiresAt };
 }
 
@@ -75,11 +72,10 @@ export async function rotateAttendanceCode(sessionId: string, slot: number): Pro
 
 export async function closeAttendanceSession(sessionId: string): Promise<void> {
   if (!db) throw new Error('Firestore chưa được cấu hình.');
-  await setDoc(
-    doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId),
-    { status: 'closed', closedAt: serverTimestamp() },
-    { merge: true },
-  );
+  await setDoc(doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId), {
+    status: 'closed',
+    closedAt: serverTimestamp(),
+  }, { merge: true });
 }
 
 export async function checkInAttendance(
@@ -96,8 +92,9 @@ export async function checkInAttendance(
   if (!sessionSnapshot.exists()) throw new Error('Phiên điểm danh không tồn tại.');
 
   const session = sessionSnapshot.data();
+  const normalizedPin = pin.trim();
   if (session.status !== 'open') throw new Error('Phiên điểm danh đã đóng.');
-  if (session.token !== token || session.pin !== pin.trim()) throw new Error('QR hoặc mã xác nhận không hợp lệ.');
+  if (session.token !== token || session.pin !== normalizedPin) throw new Error('QR hoặc mã xác nhận không hợp lệ.');
   if (!(session.expiresAt instanceof Timestamp) || session.expiresAt.toMillis() <= Date.now()) {
     throw new Error('Phiên điểm danh đã hết hạn.');
   }
@@ -112,23 +109,21 @@ export async function checkInAttendance(
     },
   });
 
-  await setDoc(
-    doc(sessionRef, 'records', profile.email),
-    {
-      email: profile.email,
-      uid: auth.currentUser.uid,
-      studentId: profile.studentId,
-      fullName: profile.fullName,
-      classCode: profile.classCode,
-      slot: session.slot ?? 0,
-      photoPath,
-      photoSize: photo.size,
-      checkedInAt: serverTimestamp(),
-      status: 'present',
-      reviewStatus: 'not_reviewed',
-    },
-    { merge: false },
-  );
+  await setDoc(doc(sessionRef, 'records', profile.email), {
+    email: profile.email,
+    uid: auth.currentUser.uid,
+    studentId: profile.studentId,
+    fullName: profile.fullName,
+    classCode: profile.classCode,
+    token,
+    pin: normalizedPin,
+    slot: session.slot ?? 0,
+    photoPath,
+    photoSize: photo.size,
+    checkedInAt: serverTimestamp(),
+    status: 'present',
+    reviewStatus: 'not_reviewed',
+  }, { merge: false });
 }
 
 export function observeAttendanceCount(sessionId: string, callback: (count: number) => void): Unsubscribe {
@@ -136,7 +131,6 @@ export function observeAttendanceCount(sessionId: string, callback: (count: numb
     callback(0);
     return () => undefined;
   }
-
   return onSnapshot(
     collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records'),
     (snapshot) => callback(snapshot.size),
