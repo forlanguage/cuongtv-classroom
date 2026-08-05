@@ -28,6 +28,26 @@ function sourceDimensions(source: CanvasImageSource): { width: number; height: n
   return { width: 0, height: 0 };
 }
 
+function decodeQrSource(source: CanvasImageSource): string | null {
+  const sourceSize = sourceDimensions(source);
+  if (!sourceSize.width || !sourceSize.height) return null;
+
+  const maxDimension = 1600;
+  const scale = Math.min(1, maxDimension / Math.max(sourceSize.width, sourceSize.height));
+  const width = Math.max(1, Math.round(sourceSize.width * scale));
+  const height = Math.max(1, Math.round(sourceSize.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) return null;
+
+  context.drawImage(source, 0, 0, width, height);
+  const image = context.getImageData(0, 0, width, height);
+  const decoded = jsQR(image.data, width, height, { inversionAttempts: 'attemptBoth' });
+  return decoded?.data ?? null;
+}
+
 function installBarcodeDetectorFallback(): void {
   const browserWindow = window as Window & { BarcodeDetector?: BarcodeDetectorLike };
   if (browserWindow.BarcodeDetector) return;
@@ -36,30 +56,27 @@ function installBarcodeDetectorFallback(): void {
     constructor(_options: { formats: string[] }) {}
 
     async detect(source: CanvasImageSource): Promise<BarcodeResult[]> {
-      const sourceSize = sourceDimensions(source);
-      if (!sourceSize.width || !sourceSize.height) return [];
-
-      const maxDimension = 960;
-      const scale = Math.min(1, maxDimension / Math.max(sourceSize.width, sourceSize.height));
-      const width = Math.max(1, Math.round(sourceSize.width * scale));
-      const height = Math.max(1, Math.round(sourceSize.height * scale));
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const context = canvas.getContext('2d', { willReadFrequently: true });
-      if (!context) return [];
-
-      context.drawImage(source, 0, 0, width, height);
-      const image = context.getImageData(0, 0, width, height);
-      const decoded = jsQR(image.data, width, height, {
-        inversionAttempts: 'attemptBoth',
-      });
-      return decoded?.data ? [{ rawValue: decoded.data }] : [];
+      const value = decodeQrSource(source);
+      return value ? [{ rawValue: value }] : [];
     }
   };
 }
 
 if (typeof window !== 'undefined') installBarcodeDetectorFallback();
+
+export async function decodeQrFromImageFile(file: File): Promise<string> {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Tệp đã chọn không phải là ảnh.');
+  }
+  const bitmap = await createImageBitmap(file);
+  try {
+    const decoded = decodeQrSource(bitmap);
+    if (!decoded) throw new Error('Không tìm thấy mã QR rõ ràng trong ảnh. Hãy chụp gần hơn và tránh rung.');
+    return decoded;
+  } finally {
+    bitmap.close();
+  }
+}
 
 async function openCamera(
   video: HTMLVideoElement,
