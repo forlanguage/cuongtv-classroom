@@ -28,10 +28,6 @@ service cloud.firestore {
         && get(rosterPath(courseId)).data.role == 'student';
     }
 
-    function sessionPath(courseId, sessionId) {
-      return /databases/$(database)/documents/courses/$(courseId)/attendanceSessions/$(sessionId);
-    }
-
     match /courses/{courseId} {
       allow read: if signedIn();
       allow write: if isAdmin();
@@ -48,26 +44,14 @@ service cloud.firestore {
         allow read: if isAdmin() || isActiveStudent(courseId);
         allow create, update, delete: if isAdmin();
 
+        match /private/{documentId} {
+          allow read, write: if isAdmin();
+        }
+
         match /records/{email} {
           allow read: if isAdmin()
             || (isActiveStudent(courseId) && normalizedEmail() == email);
-          allow create: if isActiveStudent(courseId)
-            && normalizedEmail() == email
-            && request.resource.data.email == normalizedEmail()
-            && request.resource.data.uid == request.auth.uid
-            && request.resource.data.status == 'present'
-            && request.resource.data.reviewStatus == 'not_reviewed'
-            && request.resource.data.token == get(sessionPath(courseId, sessionId)).data.token
-            && request.resource.data.pin == get(sessionPath(courseId, sessionId)).data.pin
-            && request.resource.data.slot == get(sessionPath(courseId, sessionId)).data.slot
-            && request.resource.data.photoProvider == 'google-drive'
-            && request.resource.data.photoFileId is string
-            && request.resource.data.photoFileId.size() > 5
-            && request.resource.data.photoSize > 0
-            && request.resource.data.photoSize <= 500 * 1024
-            && get(sessionPath(courseId, sessionId)).data.status == 'open'
-            && request.time < get(sessionPath(courseId, sessionId)).data.expiresAt;
-          allow update, delete: if isAdmin();
+          allow create, update, delete: if false;
         }
       }
 

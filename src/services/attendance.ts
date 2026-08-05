@@ -2,11 +2,11 @@ import {
   Timestamp,
   collection,
   doc,
-  getDoc,
   onSnapshot,
   serverTimestamp,
   setDoc,
   updateDoc,
+  writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
@@ -14,30 +14,47 @@ import { ACTIVE_COURSE_ID, type AccessProfile } from './roster';
 
 export const QR_ROTATION_MS = 60_000;
 export const SESSION_DURATION_MINUTES = 5;
+export const CLAIM_TTL_SECONDS = 180;
 
 const appsScriptUrl = import.meta.env.VITE_APPS_SCRIPT_URL as string | undefined;
 
 export interface AttendanceSession {
   id: string;
   title: string;
-  token: string;
-  pin: string;
-  slot: number;
   status: 'open' | 'closed';
-  openedAt?: Timestamp;
+  slot: number;
+  currentChallengeId: string;
+  challengeExpiresAt: Timestamp;
   expiresAt: Timestamp;
+  openedAt?: Timestamp;
 }
 
-interface DriveUploadResponse {
+export interface AttendanceAdminState extends AttendanceSession {
+  pin: string;
+}
+
+export interface AttendanceClaim {
+  claimId: string;
+  sessionId: string;
+  sessionTitle: string;
+  expiresAt: string;
+}
+
+interface GatewayResponse {
   ok: boolean;
+  error?: string;
+  claimId?: string;
+  sessionId?: string;
+  sessionTitle?: string;
+  expiresAt?: string;
   fileId?: string;
   fileName?: string;
   downloadUrl?: string;
-  error?: string;
+  checkedInAt?: string;
 }
 
-function randomToken(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(18));
+function randomId(bytesLength = 18): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(bytesLength));
   return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
 }
 
@@ -49,135 +66,154 @@ async function blobToBase64(blob: Blob): Promise<string> {
   const buffer = await blob.arrayBuffer();
   const bytes = new Uint8Array(buffer);
   let binary = '';
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
   }
   return btoa(binary);
 }
 
-async function uploadAttendancePhoto(
-  sessionId: string,
-  profile: AccessProfile,
-  photo: Blob,
-): Promise<Required<Pick<DriveUploadResponse, 'fileId' | 'fileName' | 'downloadUrl'>>> {
-  if (!appsScriptUrl) {
-    throw new Error('Chưa cấu hình VITE_APPS_SCRIPT_URL cho cổng upload Google Drive.');
-  }
+async function callGateway(payload: Record<string, unknown>, retries = 0): Promise<GatewayResponse> {
+  if (!appsScriptUrl) throw new Error('Chưa cấu hình VITE_APPS_SCRIPT_URL.');
   if (!auth?.currentUser) throw new Error('Phiên đăng nhập đã hết hạn.');
 
-  const idToken = await auth.currentUser.getIdToken();
-  const response = await fetch(appsScriptUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({
-      action: 'uploadAttendancePhoto',
-      idToken,
-      courseId: ACTIVE_COURSE_ID,
-      sessionId,
-      email: profile.email,
-      studentId: profile.studentId || 'TEST-STUDENT',
-      fullName: profile.fullName,
-      mimeType: 'image/jpeg',
-      fileBase64: await blobToBase64(photo),
-    }),
-  });
-
-  if (!response.ok) throw new Error(`Cổng upload trả về HTTP ${response.status}.`);
-  const result = await response.json() as DriveUploadResponse;
-  if (!result.ok || !result.fileId || !result.fileName || !result.downloadUrl) {
-    throw new Error(result.error || 'Không thể lưu ảnh điểm danh lên Google Drive.');
-  }
-  return {
-    fileId: result.fileId,
-    fileName: result.fileName,
-    downloadUrl: result.downloadUrl,
+  const request = {
+    ...payload,
+    idToken: await auth.currentUser.getIdToken(),
   };
+
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetch(appsScriptUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(request),
+      });
+      if (!response.ok) throw new Error(`Cổng điểm danh trả về HTTP ${response.status}.`);
+      const result = await response.json() as GatewayResponse;
+      if (!result.ok) throw new Error(result.error || 'Cổng điểm danh từ chối yêu cầu.');
+      return result;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Lỗi mạng không xác định.');
+      if (attempt < retries) {
+        const delay = (2 ** attempt) * 1000 + Math.floor(Math.random() * 1500);
+        await new Promise((resolve) => window.setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError || new Error('Không thể kết nối cổng điểm danh.');
 }
 
-export async function openAttendanceSession(title: string): Promise<AttendanceSession> {
+export async function openAttendanceSession(title: string): Promise<AttendanceAdminState> {
   if (!db) throw new Error('Firestore chưa được cấu hình.');
   const id = crypto.randomUUID();
-  const token = randomToken();
   const pin = randomPin();
+  const currentChallengeId = randomId();
   const slot = 0;
-  const expiresAt = Timestamp.fromMillis(Date.now() + SESSION_DURATION_MINUTES * 60_000);
+  const now = Date.now();
+  const expiresAt = Timestamp.fromMillis(now + SESSION_DURATION_MINUTES * 60_000);
+  const challengeExpiresAt = Timestamp.fromMillis(now + QR_ROTATION_MS);
   const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', id);
-  await setDoc(sessionRef, {
+  const secretRef = doc(sessionRef, 'private', 'config');
+  const batch = writeBatch(db);
+  batch.set(sessionRef, {
     title: title.trim() || 'Điểm danh trên lớp',
-    token,
-    pin,
-    slot,
-    rotationMs: QR_ROTATION_MS,
     status: 'open',
+    slot,
+    currentChallengeId,
+    challengeExpiresAt,
+    rotationMs: QR_ROTATION_MS,
     openedAt: serverTimestamp(),
     expiresAt,
   });
-  return { id, title: title.trim() || 'Điểm danh trên lớp', token, pin, slot, status: 'open', expiresAt };
+  batch.set(secretRef, { pin, updatedAt: serverTimestamp() });
+  await batch.commit();
+  return {
+    id,
+    title: title.trim() || 'Điểm danh trên lớp',
+    status: 'open',
+    slot,
+    currentChallengeId,
+    challengeExpiresAt,
+    expiresAt,
+    pin,
+  };
 }
 
-export async function rotateAttendanceCode(sessionId: string, slot: number): Promise<{ token: string; pin: string }> {
+export async function rotateAttendanceChallenge(
+  sessionId: string,
+  slot: number,
+): Promise<{ currentChallengeId: string; challengeExpiresAt: Timestamp; pin: string }> {
   if (!db) throw new Error('Firestore chưa được cấu hình.');
-  const token = randomToken();
+  const currentChallengeId = randomId();
   const pin = randomPin();
-  await updateDoc(doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId), {
-    token,
-    pin,
+  const challengeExpiresAt = Timestamp.fromMillis(Date.now() + QR_ROTATION_MS);
+  const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId);
+  const batch = writeBatch(db);
+  batch.update(sessionRef, {
+    currentChallengeId,
+    challengeExpiresAt,
     slot,
     rotatedAt: serverTimestamp(),
   });
-  return { token, pin };
+  batch.set(doc(sessionRef, 'private', 'config'), { pin, updatedAt: serverTimestamp() }, { merge: true });
+  await batch.commit();
+  return { currentChallengeId, challengeExpiresAt, pin };
 }
 
 export async function closeAttendanceSession(sessionId: string): Promise<void> {
   if (!db) throw new Error('Firestore chưa được cấu hình.');
-  await setDoc(doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId), {
+  await updateDoc(doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId), {
     status: 'closed',
     closedAt: serverTimestamp(),
-  }, { merge: true });
+  });
 }
 
-export async function checkInAttendance(
+export async function claimAttendanceChallenge(
   sessionId: string,
-  token: string,
+  challengeId: string,
+  profile: AccessProfile,
+): Promise<AttendanceClaim> {
+  const result = await callGateway({
+    action: 'claimAttendanceChallenge',
+    courseId: ACTIVE_COURSE_ID,
+    sessionId,
+    challengeId,
+    email: profile.email,
+  }, 1);
+
+  if (!result.claimId || !result.sessionId || !result.sessionTitle || !result.expiresAt) {
+    throw new Error('Backend không trả về claim hợp lệ.');
+  }
+  return {
+    claimId: result.claimId,
+    sessionId: result.sessionId,
+    sessionTitle: result.sessionTitle,
+    expiresAt: result.expiresAt,
+  };
+}
+
+export async function completeAttendanceClaim(
+  claim: AttendanceClaim,
   pin: string,
   profile: AccessProfile,
   photo: Blob,
+  requestId: string,
 ): Promise<void> {
-  if (!db || !auth?.currentUser) throw new Error('Firebase chưa được cấu hình đầy đủ.');
-
-  const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId);
-  const sessionSnapshot = await getDoc(sessionRef);
-  if (!sessionSnapshot.exists()) throw new Error('Phiên điểm danh không tồn tại.');
-
-  const session = sessionSnapshot.data();
-  const normalizedPin = pin.trim();
-  if (session.status !== 'open') throw new Error('Phiên điểm danh đã đóng.');
-  if (session.token !== token || session.pin !== normalizedPin) throw new Error('QR hoặc mã xác nhận không hợp lệ.');
-  if (!(session.expiresAt instanceof Timestamp) || session.expiresAt.toMillis() <= Date.now()) {
-    throw new Error('Phiên điểm danh đã hết hạn.');
-  }
-
-  const uploadedPhoto = await uploadAttendancePhoto(sessionId, profile, photo);
-
-  await setDoc(doc(sessionRef, 'records', profile.email), {
+  await callGateway({
+    action: 'completeAttendance',
+    courseId: ACTIVE_COURSE_ID,
+    claimId: claim.claimId,
+    requestId,
+    pin: pin.trim(),
     email: profile.email,
-    uid: auth.currentUser.uid,
-    studentId: profile.studentId,
+    studentId: profile.studentId || 'TEST-STUDENT',
     fullName: profile.fullName,
     classCode: profile.classCode,
-    token,
-    pin: normalizedPin,
-    slot: session.slot ?? 0,
-    photoFileId: uploadedPhoto.fileId,
-    photoFileName: uploadedPhoto.fileName,
-    photoDownloadUrl: uploadedPhoto.downloadUrl,
+    mimeType: 'image/jpeg',
     photoSize: photo.size,
-    photoProvider: 'google-drive',
-    checkedInAt: serverTimestamp(),
-    status: 'present',
-    reviewStatus: 'not_reviewed',
-  }, { merge: false });
+    fileBase64: await blobToBase64(photo),
+  }, 3);
 }
 
 export function observeOpenAttendanceSessions(
@@ -187,20 +223,16 @@ export function observeOpenAttendanceSessions(
     callback([]);
     return () => undefined;
   }
-
   return onSnapshot(
     collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'),
     (snapshot) => {
       const now = Date.now();
-      const sessions = snapshot.docs
+      callback(snapshot.docs
         .map((item) => ({ id: item.id, ...item.data() } as AttendanceSession))
-        .filter((session) => (
-          session.status === 'open'
+        .filter((session) => session.status === 'open'
           && session.expiresAt instanceof Timestamp
-          && session.expiresAt.toMillis() > now
-        ))
-        .sort((left, right) => right.expiresAt.toMillis() - left.expiresAt.toMillis());
-      callback(sessions);
+          && session.expiresAt.toMillis() > now)
+        .sort((a, b) => b.expiresAt.toMillis() - a.expiresAt.toMillis()));
     },
   );
 }
