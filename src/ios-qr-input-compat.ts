@@ -10,6 +10,7 @@ function clearPreview(): void {
 
 function attachQrInput(input: HTMLInputElement): void {
   if (input.dataset.qrCompatAttached === 'true') return;
+  if (input.closest('.qr-no-photo-panel')) return;
   if (input.type !== 'file' || input.accept !== 'image/*' || input.getAttribute('capture') !== 'environment') return;
 
   input.dataset.qrCompatAttached = 'true';
