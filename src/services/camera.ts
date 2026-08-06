@@ -12,6 +12,8 @@ type BarcodeDetectorLike = new (options: { formats: string[] }) => {
   detect: (source: CanvasImageSource) => Promise<BarcodeResult[]>;
 };
 
+type Crop = { x: number; y: number; width: number; height: number };
+
 function sourceDimensions(source: CanvasImageSource): { width: number; height: number } {
   if (source instanceof HTMLVideoElement) return { width: source.videoWidth, height: source.videoHeight };
   if (source instanceof HTMLImageElement) return { width: source.naturalWidth, height: source.naturalHeight };
@@ -20,24 +22,68 @@ function sourceDimensions(source: CanvasImageSource): { width: number; height: n
   return { width: 0, height: 0 };
 }
 
-function decodeQrSource(source: CanvasImageSource): string | null {
-  const sourceSize = sourceDimensions(source);
-  if (!sourceSize.width || !sourceSize.height) return null;
-
-  const maxDimension = 1600;
-  const scale = Math.min(1, maxDimension / Math.max(sourceSize.width, sourceSize.height));
-  const width = Math.max(1, Math.round(sourceSize.width * scale));
-  const height = Math.max(1, Math.round(sourceSize.height * scale));
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+function decodeCanvas(canvas: HTMLCanvasElement): string | null {
   const context = canvas.getContext('2d', { willReadFrequently: true });
-  if (!context) return null;
+  if (!context || !canvas.width || !canvas.height) return null;
+  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  return jsQR(image.data, canvas.width, canvas.height, { inversionAttempts: 'attemptBoth' })?.data ?? null;
+}
 
-  context.drawImage(source, 0, 0, width, height);
-  const image = context.getImageData(0, 0, width, height);
-  const decoded = jsQR(image.data, width, height, { inversionAttempts: 'attemptBoth' });
-  return decoded?.data ?? null;
+function renderCandidate(source: CanvasImageSource, crop: Crop, rotation: 0 | 90 | 180 | 270, maxDimension: number): HTMLCanvasElement {
+  const scale = Math.min(1, maxDimension / Math.max(crop.width, crop.height));
+  const drawnWidth = Math.max(1, Math.round(crop.width * scale));
+  const drawnHeight = Math.max(1, Math.round(crop.height * scale));
+  const swap = rotation === 90 || rotation === 270;
+  const canvas = document.createElement('canvas');
+  canvas.width = swap ? drawnHeight : drawnWidth;
+  canvas.height = swap ? drawnWidth : drawnHeight;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) return canvas;
+
+  context.save();
+  if (rotation === 90) {
+    context.translate(canvas.width, 0);
+    context.rotate(Math.PI / 2);
+  } else if (rotation === 180) {
+    context.translate(canvas.width, canvas.height);
+    context.rotate(Math.PI);
+  } else if (rotation === 270) {
+    context.translate(0, canvas.height);
+    context.rotate(-Math.PI / 2);
+  }
+  context.drawImage(source, crop.x, crop.y, crop.width, crop.height, 0, 0, drawnWidth, drawnHeight);
+  context.restore();
+  return canvas;
+}
+
+function centeredCrop(width: number, height: number, ratio: number): Crop {
+  const cropWidth = Math.max(1, Math.round(width * ratio));
+  const cropHeight = Math.max(1, Math.round(height * ratio));
+  return {
+    x: Math.round((width - cropWidth) / 2),
+    y: Math.round((height - cropHeight) / 2),
+    width: cropWidth,
+    height: cropHeight,
+  };
+}
+
+function decodeQrSource(source: CanvasImageSource): string | null {
+  const size = sourceDimensions(source);
+  if (!size.width || !size.height) return null;
+
+  const full: Crop = { x: 0, y: 0, width: size.width, height: size.height };
+  const crops = [full, centeredCrop(size.width, size.height, 0.86), centeredCrop(size.width, size.height, 0.68)];
+  const rotations: Array<0 | 90 | 180 | 270> = [0, 90, 270, 180];
+
+  for (const maxDimension of [2400, 1600]) {
+    for (const crop of crops) {
+      for (const rotation of rotations) {
+        const decoded = decodeCanvas(renderCandidate(source, crop, rotation, maxDimension));
+        if (decoded) return decoded;
+      }
+    }
+  }
+  return null;
 }
 
 function installBarcodeDetectorFallback(): void {
@@ -70,17 +116,18 @@ async function loadImageFile(file: File): Promise<{ source: CanvasImageSource; r
   image.src = objectUrl;
   await new Promise<void>((resolve, reject) => {
     image.onload = () => resolve();
-    image.onerror = () => reject(new Error('Không thể mở ảnh QR đã chọn.'));
+    image.onerror = () => reject(new Error('Không thể mở ảnh QR đã chọn. Hãy dùng ảnh JPEG hoặc PNG.'));
   });
   return { source: image, release: () => URL.revokeObjectURL(objectUrl) };
 }
 
 export async function decodeQrFromImageFile(file: File): Promise<string> {
-  if (!file.type.startsWith('image/')) throw new Error('Tệp đã chọn không phải là ảnh.');
+  const imageLike = file.type.startsWith('image/') || /\.(heic|heif|jpg|jpeg|png|webp)$/i.test(file.name);
+  if (!imageLike) throw new Error('Tệp đã chọn không phải là ảnh QR được hỗ trợ.');
   const loaded = await loadImageFile(file);
   try {
     const decoded = decodeQrSource(loaded.source);
-    if (!decoded) throw new Error('Không tìm thấy mã QR rõ ràng trong ảnh. Hãy chụp gần hơn, đủ sáng và tránh rung.');
+    if (!decoded) throw new Error('Chưa đọc được QR. Giữ toàn bộ mã trong khung, chụp gần hơn, tránh phản sáng rồi thử lại.');
     return decoded;
   } finally {
     loaded.release();
@@ -93,8 +140,8 @@ async function openCamera(video: HTMLVideoElement, facingMode: 'user' | 'environ
     audio: false,
     video: {
       facingMode: { ideal: facingMode },
-      width: { ideal: 720 },
-      height: { ideal: 960 },
+      width: { ideal: 1280 },
+      height: { ideal: 1280 },
     },
   });
   video.srcObject = stream;
