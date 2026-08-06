@@ -34,6 +34,7 @@ export interface AttendanceSession {
   challengeExpiresAt: Timestamp;
   expiresAt: Timestamp;
   openedAt?: Timestamp;
+  pinRotationMode?: 'session';
 }
 
 export interface AttendanceAdminState extends AttendanceSession { pin: string; }
@@ -144,25 +145,29 @@ async function closeExpiredOrDuplicateSessions(sessions: AttendanceSession[]): P
   return keep;
 }
 
-export async function recoverActiveAttendanceSession(): Promise<AttendanceAdminState | null> {
+async function readSessionPin(sessionId: string): Promise<string> {
   const firestore = requireDb();
-  const active = await closeExpiredOrDuplicateSessions(await listOpenSessions());
-  if (!active) return null;
-
   const secretSnapshot = await getDoc(doc(
     firestore,
     'courses', ACTIVE_COURSE_ID,
-    'attendanceSessions', active.id,
+    'attendanceSessions', sessionId,
     'private', 'config',
   ));
   const pin = secretSnapshot.data()?.pin;
   if (typeof pin !== 'string' || !/^\d{4}$/.test(pin)) {
     throw new Error('Phiên đang mở không có PIN hợp lệ. Hãy đóng phiên và tạo lại.');
   }
+  return pin;
+}
+
+export async function recoverActiveAttendanceSession(): Promise<AttendanceAdminState | null> {
+  const active = await closeExpiredOrDuplicateSessions(await listOpenSessions());
+  if (!active) return null;
+  const pin = await readSessionPin(active.id);
 
   if (!(active.challengeExpiresAt instanceof Timestamp) || active.challengeExpiresAt.toMillis() <= Date.now()) {
     const next = await rotateAttendanceChallenge(active.id, Number(active.slot || 0) + 1);
-    return { ...active, ...next, slot: Number(active.slot || 0) + 1 };
+    return { ...active, ...next, slot: Number(active.slot || 0) + 1, pin };
   }
   return { ...active, pin };
 }
@@ -183,11 +188,13 @@ export async function openAttendanceSession(title: string): Promise<AttendanceAd
   batch.set(sessionRef, {
     title: title.trim() || 'Điểm danh trên lớp', status: 'open', slot: 0,
     currentChallengeId, challengeExpiresAt, rotationMs: QR_ROTATION_MS,
-    openedAt: serverTimestamp(), expiresAt,
+    pinRotationMode: 'session', openedAt: serverTimestamp(), expiresAt,
   });
   batch.set(doc(sessionRef, 'private', 'config'), {
     pin,
     pinProof: await pinProof(id, pin),
+    pinRotationMode: 'session',
+    createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
   await batch.commit();
@@ -199,25 +206,23 @@ export async function openAttendanceSession(title: string): Promise<AttendanceAd
     currentChallengeId,
     challengeExpiresAt,
     expiresAt,
+    pinRotationMode: 'session',
     pin,
   };
 }
 
-export async function rotateAttendanceChallenge(sessionId: string, slot: number): Promise<{ currentChallengeId: string; challengeExpiresAt: Timestamp; pin: string }> {
+export async function rotateAttendanceChallenge(
+  sessionId: string,
+  slot: number,
+): Promise<{ currentChallengeId: string; challengeExpiresAt: Timestamp }> {
   const firestore = requireDb();
   const currentChallengeId = randomId();
-  const pin = randomPin();
   const challengeExpiresAt = Timestamp.fromMillis(Date.now() + QR_ROTATION_MS);
-  const sessionRef = doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId);
-  const batch = writeBatch(firestore);
-  batch.update(sessionRef, { currentChallengeId, challengeExpiresAt, slot, rotatedAt: serverTimestamp() });
-  batch.set(doc(sessionRef, 'private', 'config'), {
-    pin,
-    pinProof: await pinProof(sessionId, pin),
-    updatedAt: serverTimestamp(),
-  }, { merge: true });
-  await batch.commit();
-  return { currentChallengeId, challengeExpiresAt, pin };
+  await updateDoc(
+    doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId),
+    { currentChallengeId, challengeExpiresAt, slot, rotatedAt: serverTimestamp() },
+  );
+  return { currentChallengeId, challengeExpiresAt };
 }
 
 export async function closeAttendanceSession(sessionId: string): Promise<void> {
@@ -309,7 +314,7 @@ export async function recordAttendanceByPin(sessionOrId: AttendanceSession | str
     const repeated = await getDoc(recordRef);
     if (repeated.exists()) return receiptFromSnapshot(sessionId, sessionTitle, repeated, true);
     const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
-    if (code.includes('permission-denied')) throw new Error('PIN không đúng, PIN vừa thay đổi, hoặc phiên điểm danh đã đóng.');
+    if (code.includes('permission-denied')) throw new Error('PIN không đúng hoặc phiên điểm danh đã đóng.');
     if (code.includes('unavailable') || !navigator.onLine) throw new Error('Mạng đang không ổn định. Hãy kiểm tra kết nối và gửi lại.');
     throw error;
   }
