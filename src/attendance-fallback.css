@@ -1,0 +1,13 @@
+.attendance-fallback-main { max-width: 1180px; margin: 0 auto 48px; padding: 0 24px; }
+.fallback-panel { margin-top: 24px; }
+.fallback-panel > p { color: #475569; }
+.fallback-session-list { display: grid; gap: 10px; }
+.fallback-session-list button { display: flex; justify-content: space-between; align-items: center; gap: 16px; text-align: left; padding: 14px 16px; border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; color: #0f172a; }
+.fallback-session-list button:hover { border-color: #64748b; }
+.fallback-session-list span, .fallback-form span { color: #64748b; font-size: .88rem; }
+.fallback-form { display: grid; gap: 14px; max-width: 620px; }
+.fallback-form > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.fallback-form input { max-width: 180px; font-size: 1.35rem; letter-spacing: .24em; text-align: center; }
+.fallback-receipt { padding: 16px; border: 1px solid #bfdbfe; border-radius: 14px; background: #eff6ff; }
+.fallback-receipt h3 { margin-top: 0; }
+@media (max-width: 700px) { .attendance-fallback-main { padding: 0 14px; } .fallback-session-list button { flex-direction: column; align-items: flex-start; } }
