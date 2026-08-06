@@ -62,8 +62,20 @@ service cloud.firestore {
 
           allow create: if isActiveStudent(courseId)
             && normalizedEmail() == email
+            && request.resource.data.keys().hasOnly([
+              'email', 'uid', 'studentId', 'fullName', 'classCode',
+              'pinProof', 'requestId', 'checkedInAt', 'status', 'statusLabel',
+              'verificationMode', 'evidenceLevel', 'qrVerified',
+              'photoProvided', 'reviewStatus'
+            ])
             && request.resource.data.email == normalizedEmail()
             && request.resource.data.uid == request.auth.uid
+            && request.resource.data.studentId is string
+            && request.resource.data.fullName is string
+            && request.resource.data.classCode is string
+            && request.resource.data.requestId is string
+            && request.resource.data.requestId.size() > 0
+            && request.resource.data.checkedInAt == request.time
             && request.resource.data.status == 'recorded'
             && request.resource.data.statusLabel == 'Đã ghi nhận'
             && request.resource.data.verificationMode == 'pin_only'
@@ -71,9 +83,9 @@ service cloud.firestore {
             && request.resource.data.qrVerified == false
             && request.resource.data.photoProvided == false
             && request.resource.data.reviewStatus == 'needs_review'
-            && request.resource.data.submittedPin is string
-            && request.resource.data.submittedPin.size() == 4
-            && request.resource.data.submittedPin == get(sessionSecretPath(courseId, sessionId)).data.pin
+            && request.resource.data.pinProof is string
+            && request.resource.data.pinProof.size() == 64
+            && request.resource.data.pinProof == get(sessionSecretPath(courseId, sessionId)).data.pinProof
             && get(sessionPath(courseId, sessionId)).data.status == 'open'
             && request.time < get(sessionPath(courseId, sessionId)).data.expiresAt;
 
