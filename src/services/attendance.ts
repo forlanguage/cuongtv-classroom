@@ -11,6 +11,9 @@ import {
   updateDoc,
   where,
   writeBatch,
+  type DocumentData,
+  type DocumentSnapshot,
+  type Firestore,
   type Unsubscribe,
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
@@ -103,10 +106,15 @@ async function callGateway(payload: Record<string, unknown>, retries = 0): Promi
   throw lastError || new Error('Không thể kết nối cổng điểm danh.');
 }
 
-async function listOpenSessions(): Promise<AttendanceSession[]> {
+function requireDb(): Firestore {
   if (!db) throw new Error('Firestore chưa được cấu hình.');
+  return db;
+}
+
+async function listOpenSessions(): Promise<AttendanceSession[]> {
+  const firestore = requireDb();
   const snapshot = await getDocs(query(
-    collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'),
+    collection(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'),
     where('status', '==', 'open'),
   ));
   return snapshot.docs
@@ -116,16 +124,20 @@ async function listOpenSessions(): Promise<AttendanceSession[]> {
 }
 
 async function closeExpiredOrDuplicateSessions(sessions: AttendanceSession[]): Promise<AttendanceSession | null> {
-  if (!db) throw new Error('Firestore chưa được cấu hình.');
+  const firestore = requireDb();
   const now = Date.now();
   const active = sessions.filter((session) => session.expiresAt.toMillis() > now);
   const keep = active[0] || null;
   const toClose = sessions.filter((session) => session.expiresAt.toMillis() <= now || (keep && session.id !== keep.id));
   if (toClose.length) {
-    const batch = writeBatch(db);
+    const batch = writeBatch(firestore);
     toClose.forEach((session) => batch.update(
-      doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', session.id),
-      { status: 'closed', closedAt: serverTimestamp(), closeReason: session.expiresAt.toMillis() <= now ? 'expired' : 'duplicate_open_session' },
+      doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', session.id),
+      {
+        status: 'closed',
+        closedAt: serverTimestamp(),
+        closeReason: session.expiresAt.toMillis() <= now ? 'expired' : 'duplicate_open_session',
+      },
     ));
     await batch.commit();
   }
@@ -133,12 +145,12 @@ async function closeExpiredOrDuplicateSessions(sessions: AttendanceSession[]): P
 }
 
 export async function recoverActiveAttendanceSession(): Promise<AttendanceAdminState | null> {
-  if (!db) throw new Error('Firestore chưa được cấu hình.');
+  const firestore = requireDb();
   const active = await closeExpiredOrDuplicateSessions(await listOpenSessions());
   if (!active) return null;
 
   const secretSnapshot = await getDoc(doc(
-    db,
+    firestore,
     'courses', ACTIVE_COURSE_ID,
     'attendanceSessions', active.id,
     'private', 'config',
@@ -156,7 +168,7 @@ export async function recoverActiveAttendanceSession(): Promise<AttendanceAdminS
 }
 
 export async function openAttendanceSession(title: string): Promise<AttendanceAdminState> {
-  if (!db) throw new Error('Firestore chưa được cấu hình.');
+  const firestore = requireDb();
   const existing = await closeExpiredOrDuplicateSessions(await listOpenSessions());
   if (existing) throw new Error(`Đang có phiên “${existing.title}”. Hãy đóng phiên hiện tại trước khi mở phiên mới.`);
 
@@ -166,8 +178,8 @@ export async function openAttendanceSession(title: string): Promise<AttendanceAd
   const now = Date.now();
   const expiresAt = Timestamp.fromMillis(now + SESSION_DURATION_MINUTES * 60_000);
   const challengeExpiresAt = Timestamp.fromMillis(now + QR_ROTATION_MS);
-  const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', id);
-  const batch = writeBatch(db);
+  const sessionRef = doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', id);
+  const batch = writeBatch(firestore);
   batch.set(sessionRef, {
     title: title.trim() || 'Điểm danh trên lớp', status: 'open', slot: 0,
     currentChallengeId, challengeExpiresAt, rotationMs: QR_ROTATION_MS,
@@ -179,16 +191,25 @@ export async function openAttendanceSession(title: string): Promise<AttendanceAd
     updatedAt: serverTimestamp(),
   });
   await batch.commit();
-  return { id, title: title.trim() || 'Điểm danh trên lớp', status: 'open', slot: 0, currentChallengeId, challengeExpiresAt, expiresAt, pin };
+  return {
+    id,
+    title: title.trim() || 'Điểm danh trên lớp',
+    status: 'open',
+    slot: 0,
+    currentChallengeId,
+    challengeExpiresAt,
+    expiresAt,
+    pin,
+  };
 }
 
 export async function rotateAttendanceChallenge(sessionId: string, slot: number): Promise<{ currentChallengeId: string; challengeExpiresAt: Timestamp; pin: string }> {
-  if (!db) throw new Error('Firestore chưa được cấu hình.');
+  const firestore = requireDb();
   const currentChallengeId = randomId();
   const pin = randomPin();
   const challengeExpiresAt = Timestamp.fromMillis(Date.now() + QR_ROTATION_MS);
-  const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId);
-  const batch = writeBatch(db);
+  const sessionRef = doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId);
+  const batch = writeBatch(firestore);
   batch.update(sessionRef, { currentChallengeId, challengeExpiresAt, slot, rotatedAt: serverTimestamp() });
   batch.set(doc(sessionRef, 'private', 'config'), {
     pin,
@@ -200,14 +221,30 @@ export async function rotateAttendanceChallenge(sessionId: string, slot: number)
 }
 
 export async function closeAttendanceSession(sessionId: string): Promise<void> {
-  if (!db) throw new Error('Firestore chưa được cấu hình.');
-  await updateDoc(doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId), { status: 'closed', closedAt: serverTimestamp() });
+  const firestore = requireDb();
+  await updateDoc(
+    doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId),
+    { status: 'closed', closedAt: serverTimestamp() },
+  );
 }
 
 export async function claimAttendanceChallenge(sessionId: string, challengeId: string, profile: AccessProfile): Promise<AttendanceClaim> {
-  const result = await callGateway({ action: 'claimAttendanceChallenge', courseId: ACTIVE_COURSE_ID, sessionId, challengeId, email: profile.email }, 1);
-  if (!result.claimId || !result.sessionId || !result.sessionTitle || !result.expiresAt) throw new Error('Backend không trả về claim hợp lệ.');
-  return { claimId: result.claimId, sessionId: result.sessionId, sessionTitle: result.sessionTitle, expiresAt: result.expiresAt };
+  const result = await callGateway({
+    action: 'claimAttendanceChallenge',
+    courseId: ACTIVE_COURSE_ID,
+    sessionId,
+    challengeId,
+    email: profile.email,
+  }, 1);
+  if (!result.claimId || !result.sessionId || !result.sessionTitle || !result.expiresAt) {
+    throw new Error('Backend không trả về claim hợp lệ.');
+  }
+  return {
+    claimId: result.claimId,
+    sessionId: result.sessionId,
+    sessionTitle: result.sessionTitle,
+    expiresAt: result.expiresAt,
+  };
 }
 
 export async function completeAttendanceClaim(claim: AttendanceClaim, pin: string, profile: AccessProfile, photo: Blob, requestId: string): Promise<void> {
@@ -220,26 +257,33 @@ export async function completeAttendanceClaim(claim: AttendanceClaim, pin: strin
   }, 3);
 }
 
-function receiptFromSnapshot(sessionId: string, sessionTitle: string, snapshot: Awaited<ReturnType<typeof getDoc>>, alreadyRecorded: boolean): PinAttendanceReceipt {
+function receiptFromSnapshot(
+  sessionId: string,
+  sessionTitle: string,
+  snapshot: DocumentSnapshot<DocumentData>,
+  alreadyRecorded: boolean,
+): PinAttendanceReceipt {
   const data = snapshot.data();
+  const checkedInAt = data?.checkedInAt;
   return {
     sessionId,
     sessionTitle,
     status: 'recorded',
     statusLabel: 'Đã ghi nhận',
-    checkedInAt: data?.checkedInAt instanceof Timestamp ? data.checkedInAt : null,
+    checkedInAt: checkedInAt instanceof Timestamp ? checkedInAt : null,
     alreadyRecorded,
   };
 }
 
 export async function recordAttendanceByPin(sessionOrId: AttendanceSession | string, pin: string, profile: AccessProfile): Promise<PinAttendanceReceipt> {
-  if (!db || !auth?.currentUser) throw new Error('Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
+  const firestore = requireDb();
+  if (!auth?.currentUser) throw new Error('Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
   const sessionId = typeof sessionOrId === 'string' ? sessionOrId : sessionOrId.id;
   const sessionTitle = typeof sessionOrId === 'string' ? 'Phiên điểm danh' : sessionOrId.title;
   const normalizedPin = pin.trim();
   if (!/^\d{4}$/.test(normalizedPin)) throw new Error('PIN phải gồm đúng 4 chữ số.');
 
-  const recordRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records', profile.email);
+  const recordRef = doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records', profile.email);
   const existing = await getDoc(recordRef);
   if (existing.exists()) return receiptFromSnapshot(sessionId, sessionTitle, existing, true);
 
@@ -286,5 +330,8 @@ export function observeOpenAttendanceSessions(callback: (sessions: AttendanceSes
 
 export function observeAttendanceCount(sessionId: string, callback: (count: number) => void): Unsubscribe {
   if (!db) { callback(0); return () => undefined; }
-  return onSnapshot(collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records'), (snapshot) => callback(snapshot.size));
+  return onSnapshot(
+    collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records'),
+    (snapshot) => callback(snapshot.size),
+  );
 }
