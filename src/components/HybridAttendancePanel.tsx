@@ -35,10 +35,6 @@ export function HybridAttendancePanel({ profile }: { profile: AccessProfile }) {
   const [requestId, setRequestId] = useState(crypto.randomUUID());
 
   useEffect(() => observeOpenAttendanceSessions(setSessions), []);
-  useEffect(() => () => {
-    if (qrEvidence) URL.revokeObjectURL(qrEvidence.previewUrl);
-    if (faceEvidence) URL.revokeObjectURL(faceEvidence.previewUrl);
-  }, [qrEvidence, faceEvidence]);
 
   const redirectSession = useMemo(() => redirectChallenge
     ? sessions.find((session) => session.currentChallengeId === redirectChallenge) || null
