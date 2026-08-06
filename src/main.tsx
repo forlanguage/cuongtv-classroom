@@ -19,6 +19,7 @@ import {
   type AttendanceAdminState,
   type AttendanceClaim,
   type AttendanceSession,
+  type PinAttendanceReceipt,
 } from './services/attendance';
 import {
   captureCompressedPhoto,
@@ -52,6 +53,7 @@ function App() {
   const [openSessions, setOpenSessions] = useState<AttendanceSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<AttendanceSession | null>(null);
   const [claim, setClaim] = useState<AttendanceClaim | null>(null);
+  const [pinReceipt, setPinReceipt] = useState<PinAttendanceReceipt | null>(null);
   const [studentStep, setStudentStep] = useState<StudentStep>('list');
   const [pin, setPin] = useState('');
   const [photo, setPhoto] = useState<CapturedPhoto | null>(null);
@@ -125,7 +127,7 @@ function App() {
   function resetStudentFlow() {
     stopCamera(cameraStream); if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
     if (photo) URL.revokeObjectURL(photo.previewUrl);
-    setCameraStream(null); setSelectedSession(null); setClaim(null); setPin(''); setPhoto(null); setRequestId(''); setQrImageBusy(false); setStudentStep('list'); setMessage('');
+    setCameraStream(null); setSelectedSession(null); setClaim(null); setPinReceipt(null); setPin(''); setPhoto(null); setRequestId(''); setQrImageBusy(false); setStudentStep('list'); setMessage('');
   }
   async function acceptQrValue(session: AttendanceSession, value: string) {
     if (!profile) return;
@@ -160,15 +162,20 @@ function App() {
   async function openPinOnly(session?: AttendanceSession | null) {
     const target = session || selectedSession; if (!target) return;
     stopCamera(cameraStream); if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
-    setCameraStream(null); setSelectedSession(target); setPin(''); setStudentStep('pinOnly');
+    setCameraStream(null); setSelectedSession(target); setPinReceipt(null); setPin(''); setStudentStep('pinOnly');
     setMessage('Chế độ dự phòng: hệ thống chỉ ghi nhận bằng PIN và đánh dấu cần hậu kiểm.');
   }
   async function submitPinOnly() {
     if (!profile || !selectedSession || pin.length !== 4) return;
     setAttendanceBusy(true);
+    setMessage('Đang xác minh PIN và ghi nhận…');
     try {
-      await recordAttendanceByPin(selectedSession.id, pin, profile);
-      setStudentStep('done'); setMessage('Đã ghi nhận bằng PIN. Trạng thái này cần giảng viên hậu kiểm.');
+      const receipt = await recordAttendanceByPin(selectedSession, pin, profile);
+      setPinReceipt(receipt);
+      setStudentStep('done');
+      setMessage(receipt.alreadyRecorded
+        ? 'Bạn đã được ghi nhận trước đó. Hệ thống đang hiển thị biên nhận gốc.'
+        : 'Đã ghi nhận bằng PIN. Trạng thái này cần giảng viên hậu kiểm.');
     } catch (e) { setMessage(e instanceof Error ? e.message : 'Không thể ghi nhận bằng PIN.'); }
     finally { setAttendanceBusy(false); }
   }
@@ -188,7 +195,7 @@ function App() {
   async function handleCheckIn() {
     if (!profile || !claim || !photo || !requestId) return;
     setAttendanceBusy(true);
-    try { await completeAttendanceClaim(claim, pin, profile, photo.blob, requestId); setStudentStep('done'); setMessage('Điểm danh đầy đủ thành công.'); }
+    try { await completeAttendanceClaim(claim, pin, profile, photo.blob, requestId); setPinReceipt(null); setStudentStep('done'); setMessage('Điểm danh đầy đủ thành công.'); }
     catch (e) { setMessage(e instanceof Error ? e.message : 'Không thể hoàn tất điểm danh.'); }
     finally { setAttendanceBusy(false); }
   }
@@ -204,7 +211,7 @@ function App() {
       {studentStep === 'pin' && claim && <><h3>Nhập PIN</h3><input inputMode="numeric" maxLength={4} value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="0000" /><div className="attendance-controls"><button disabled={pin.length !== 4} onClick={() => void handleOpenPhotoCamera()}>Tiếp tục chụp ảnh</button><button onClick={() => void openPinOnly()}>Bỏ qua ảnh — chỉ ghi nhận</button></div></>}
       {studentStep === 'pinOnly' && <><h3>Ghi nhận bằng PIN</h3><p>Không cần QR hoặc ảnh. Bản ghi sẽ có trạng thái “Đã ghi nhận” và cần hậu kiểm.</p><input inputMode="numeric" maxLength={4} value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="0000" /><div className="attendance-controls"><button disabled={attendanceBusy || pin.length !== 4} onClick={() => void submitPinOnly()}>{attendanceBusy ? 'Đang ghi nhận…' : 'Ghi nhận bằng PIN'}</button><button onClick={resetStudentFlow}>Hủy</button></div></>}
       {studentStep === 'photo' && <><h3>Chụp ảnh khuôn mặt</h3><video ref={videoRef} muted playsInline className={cameraStream ? 'camera-preview active' : 'camera-preview'} />{photo && <img className="photo-preview" src={photo.previewUrl} alt="Ảnh điểm danh" />}<div className="attendance-controls">{cameraStream && <button onClick={() => void handleCapturePhoto()}>Chụp ảnh</button>}<button disabled={!photo || attendanceBusy} onClick={() => void handleCheckIn()}>Gửi điểm danh</button><button onClick={() => void openPinOnly()}>Camera lỗi — chỉ ghi nhận PIN</button></div></>}
-      {studentStep === 'done' && <><h3>Đã ghi nhận</h3><p>Hệ thống đã lưu kết quả. Giảng viên có thể phân biệt bản ghi đầy đủ và bản ghi PIN-only.</p><button onClick={resetStudentFlow}>Về danh sách</button></>}
+      {studentStep === 'done' && <>{pinReceipt ? <><h3>{pinReceipt.statusLabel}</h3><div className="profile-grid"><div><strong>Phiên</strong><span>{pinReceipt.sessionTitle}</span></div><div><strong>Thời gian</strong><span>{pinReceipt.checkedInAt ? pinReceipt.checkedInAt.toDate().toLocaleString('vi-VN') : 'Đang đồng bộ thời gian máy chủ'}</span></div><div><strong>Xác minh</strong><span>PIN-only · cần hậu kiểm</span></div></div>{pinReceipt.alreadyRecorded && <p>Bạn đã gửi trước đó; đây là biên nhận ban đầu, không tạo thêm bản ghi.</p>}</> : <><h3>Đã điểm danh</h3><p>Hệ thống đã lưu kết quả điểm danh đầy đủ.</p></>}<button onClick={resetStudentFlow}>Về danh sách</button></>}
       <p className="privacy-note">PIN-only không được coi là xác minh đầy đủ; bản ghi được đánh dấu cần hậu kiểm.</p>
     </div></section>}
 
