@@ -2,6 +2,7 @@ import {
   Timestamp,
   collection,
   doc,
+  getDoc,
   onSnapshot,
   serverTimestamp,
   setDoc,
@@ -31,6 +32,14 @@ export interface AttendanceSession {
 
 export interface AttendanceAdminState extends AttendanceSession { pin: string; }
 export interface AttendanceClaim { claimId: string; sessionId: string; sessionTitle: string; expiresAt: string; }
+export interface PinAttendanceReceipt {
+  sessionId: string;
+  sessionTitle: string;
+  status: 'recorded';
+  statusLabel: 'Đã ghi nhận';
+  checkedInAt: Timestamp | null;
+  alreadyRecorded: boolean;
+}
 
 interface GatewayResponse {
   ok: boolean;
@@ -48,6 +57,12 @@ function randomId(bytesLength = 18): string {
 
 function randomPin(): string {
   return String(crypto.getRandomValues(new Uint32Array(1))[0] % 10_000).padStart(4, '0');
+}
+
+async function pinProof(sessionId: string, pin: string): Promise<string> {
+  const input = new TextEncoder().encode(`${sessionId}:${pin}`);
+  const digest = await crypto.subtle.digest('SHA-256', input);
+  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
@@ -100,7 +115,11 @@ export async function openAttendanceSession(title: string): Promise<AttendanceAd
     currentChallengeId, challengeExpiresAt, rotationMs: QR_ROTATION_MS,
     openedAt: serverTimestamp(), expiresAt,
   });
-  batch.set(doc(sessionRef, 'private', 'config'), { pin, updatedAt: serverTimestamp() });
+  batch.set(doc(sessionRef, 'private', 'config'), {
+    pin,
+    pinProof: await pinProof(id, pin),
+    updatedAt: serverTimestamp(),
+  });
   await batch.commit();
   return { id, title: title.trim() || 'Điểm danh trên lớp', status: 'open', slot: 0, currentChallengeId, challengeExpiresAt, expiresAt, pin };
 }
@@ -113,7 +132,11 @@ export async function rotateAttendanceChallenge(sessionId: string, slot: number)
   const sessionRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId);
   const batch = writeBatch(db);
   batch.update(sessionRef, { currentChallengeId, challengeExpiresAt, slot, rotatedAt: serverTimestamp() });
-  batch.set(doc(sessionRef, 'private', 'config'), { pin, updatedAt: serverTimestamp() }, { merge: true });
+  batch.set(doc(sessionRef, 'private', 'config'), {
+    pin,
+    pinProof: await pinProof(sessionId, pin),
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
   await batch.commit();
   return { currentChallengeId, challengeExpiresAt, pin };
 }
@@ -139,34 +162,58 @@ export async function completeAttendanceClaim(claim: AttendanceClaim, pin: strin
   }, 3);
 }
 
-export async function recordAttendanceByPin(sessionId: string, pin: string, profile: AccessProfile): Promise<void> {
-  if (!db || !auth?.currentUser) throw new Error('Firebase chưa được cấu hình hoặc phiên đăng nhập đã hết hạn.');
+function receiptFromSnapshot(sessionId: string, sessionTitle: string, snapshot: Awaited<ReturnType<typeof getDoc>>, alreadyRecorded: boolean): PinAttendanceReceipt {
+  const data = snapshot.data();
+  return {
+    sessionId,
+    sessionTitle,
+    status: 'recorded',
+    statusLabel: 'Đã ghi nhận',
+    checkedInAt: data?.checkedInAt instanceof Timestamp ? data.checkedInAt : null,
+    alreadyRecorded,
+  };
+}
+
+export async function recordAttendanceByPin(sessionOrId: AttendanceSession | string, pin: string, profile: AccessProfile): Promise<PinAttendanceReceipt> {
+  if (!db || !auth?.currentUser) throw new Error('Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
+  const sessionId = typeof sessionOrId === 'string' ? sessionOrId : sessionOrId.id;
+  const sessionTitle = typeof sessionOrId === 'string' ? 'Phiên điểm danh' : sessionOrId.title;
   const normalizedPin = pin.trim();
   if (!/^\d{4}$/.test(normalizedPin)) throw new Error('PIN phải gồm đúng 4 chữ số.');
 
-  const recordRef = doc(
-    db,
-    'courses', ACTIVE_COURSE_ID,
-    'attendanceSessions', sessionId,
-    'records', profile.email,
-  );
-  await setDoc(recordRef, {
-    email: profile.email,
-    uid: auth.currentUser.uid,
-    studentId: profile.studentId || 'TEST-STUDENT',
-    fullName: profile.fullName || '',
-    classCode: profile.classCode || '',
-    submittedPin: normalizedPin,
-    requestId: crypto.randomUUID(),
-    checkedInAt: serverTimestamp(),
-    status: 'recorded',
-    statusLabel: 'Đã ghi nhận',
-    verificationMode: 'pin_only',
-    evidenceLevel: 'limited',
-    qrVerified: false,
-    photoProvided: false,
-    reviewStatus: 'needs_review',
-  });
+  const recordRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records', profile.email);
+  const existing = await getDoc(recordRef);
+  if (existing.exists()) return receiptFromSnapshot(sessionId, sessionTitle, existing, true);
+
+  try {
+    await setDoc(recordRef, {
+      email: profile.email,
+      uid: auth.currentUser.uid,
+      studentId: profile.studentId || 'TEST-STUDENT',
+      fullName: profile.fullName || '',
+      classCode: profile.classCode || '',
+      pinProof: await pinProof(sessionId, normalizedPin),
+      requestId: crypto.randomUUID(),
+      checkedInAt: serverTimestamp(),
+      status: 'recorded',
+      statusLabel: 'Đã ghi nhận',
+      verificationMode: 'pin_only',
+      evidenceLevel: 'limited',
+      qrVerified: false,
+      photoProvided: false,
+      reviewStatus: 'needs_review',
+    });
+  } catch (error) {
+    const repeated = await getDoc(recordRef);
+    if (repeated.exists()) return receiptFromSnapshot(sessionId, sessionTitle, repeated, true);
+    const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+    if (code.includes('permission-denied')) throw new Error('PIN không đúng, PIN vừa thay đổi, hoặc phiên điểm danh đã đóng.');
+    if (code.includes('unavailable') || !navigator.onLine) throw new Error('Mạng đang không ổn định. Hãy kiểm tra kết nối và gửi lại.');
+    throw error;
+  }
+
+  const saved = await getDoc(recordRef);
+  return receiptFromSnapshot(sessionId, sessionTitle, saved, false);
 }
 
 export function observeOpenAttendanceSessions(callback: (sessions: AttendanceSession[]) => void): Unsubscribe {
