@@ -20,8 +20,53 @@ import { auth, db } from './firebase';
 import { ACTIVE_COURSE_ID, type AccessProfile } from './roster';
 
 export const QR_ROTATION_MS = 60_000;
-export const SESSION_DURATION_MINUTES = 5;
 export const CLAIM_TTL_SECONDS = 180;
+
+export type AttendancePolicyPresetId = 'pin_only' | 'qr_pin' | 'qr_pin_photo';
+
+export interface AttendancePolicy {
+  presetId: AttendancePolicyPresetId;
+  label: string;
+  description: string;
+  allowPinOnly: boolean;
+  requireQr: boolean;
+  requirePhoto: boolean;
+  durationMinutes: number;
+  lateGraceMinutes: number;
+}
+
+export const ATTENDANCE_POLICY_PRESETS: Record<AttendancePolicyPresetId, AttendancePolicy> = {
+  pin_only: {
+    presetId: 'pin_only',
+    label: 'Nhanh — PIN-only',
+    description: 'Chỉ nhập PIN; mọi bản ghi cần giảng viên hậu kiểm.',
+    allowPinOnly: true,
+    requireQr: false,
+    requirePhoto: false,
+    durationMinutes: 5,
+    lateGraceMinutes: 2,
+  },
+  qr_pin: {
+    presetId: 'qr_pin',
+    label: 'Tiêu chuẩn — QR + PIN',
+    description: 'Yêu cầu QR và PIN; không yêu cầu ảnh.',
+    allowPinOnly: false,
+    requireQr: true,
+    requirePhoto: false,
+    durationMinutes: 5,
+    lateGraceMinutes: 1,
+  },
+  qr_pin_photo: {
+    presetId: 'qr_pin_photo',
+    label: 'Xác minh cao — QR + PIN + ảnh',
+    description: 'Yêu cầu QR, PIN và ảnh điểm danh.',
+    allowPinOnly: false,
+    requireQr: true,
+    requirePhoto: true,
+    durationMinutes: 5,
+    lateGraceMinutes: 0,
+  },
+};
 
 const appsScriptUrl = import.meta.env.VITE_APPS_SCRIPT_URL as string | undefined;
 
@@ -33,8 +78,15 @@ export interface AttendanceSession {
   currentChallengeId: string;
   challengeExpiresAt: Timestamp;
   expiresAt: Timestamp;
+  scheduledEndsAt?: Timestamp;
   openedAt?: Timestamp;
   pinRotationMode?: 'session';
+  policyPreset: AttendancePolicyPresetId;
+  allowPinOnly: boolean;
+  requireQr: boolean;
+  requirePhoto: boolean;
+  durationMinutes: number;
+  lateGraceMinutes: number;
 }
 
 export interface AttendanceAdminState extends AttendanceSession { pin: string; }
@@ -99,9 +151,7 @@ async function callGateway(payload: Record<string, unknown>, retries = 0): Promi
       return result;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error('Lỗi mạng không xác định.');
-      if (attempt < retries) {
-        await new Promise((resolve) => window.setTimeout(resolve, (2 ** attempt) * 1000 + Math.random() * 1200));
-      }
+      if (attempt < retries) await new Promise((resolve) => window.setTimeout(resolve, (2 ** attempt) * 1000 + Math.random() * 1200));
     }
   }
   throw lastError || new Error('Không thể kết nối cổng điểm danh.');
@@ -112,6 +162,38 @@ function requireDb(): Firestore {
   return db;
 }
 
+function normalizePolicy(data: DocumentData): Pick<AttendanceSession, 'policyPreset' | 'allowPinOnly' | 'requireQr' | 'requirePhoto' | 'durationMinutes' | 'lateGraceMinutes'> {
+  const presetId = data.policyPreset in ATTENDANCE_POLICY_PRESETS
+    ? data.policyPreset as AttendancePolicyPresetId
+    : 'qr_pin_photo';
+  const fallback = ATTENDANCE_POLICY_PRESETS[presetId];
+  return {
+    policyPreset: presetId,
+    allowPinOnly: typeof data.allowPinOnly === 'boolean' ? data.allowPinOnly : fallback.allowPinOnly,
+    requireQr: typeof data.requireQr === 'boolean' ? data.requireQr : fallback.requireQr,
+    requirePhoto: typeof data.requirePhoto === 'boolean' ? data.requirePhoto : fallback.requirePhoto,
+    durationMinutes: typeof data.durationMinutes === 'number' ? data.durationMinutes : fallback.durationMinutes,
+    lateGraceMinutes: typeof data.lateGraceMinutes === 'number' ? data.lateGraceMinutes : fallback.lateGraceMinutes,
+  };
+}
+
+function normalizeSession(id: string, data: DocumentData): AttendanceSession | null {
+  if (!(data.expiresAt instanceof Timestamp) || !(data.challengeExpiresAt instanceof Timestamp)) return null;
+  return {
+    id,
+    title: typeof data.title === 'string' && data.title.trim() ? data.title : 'Điểm danh trên lớp',
+    status: data.status === 'closed' ? 'closed' : 'open',
+    slot: Number(data.slot || 0),
+    currentChallengeId: typeof data.currentChallengeId === 'string' ? data.currentChallengeId : '',
+    challengeExpiresAt: data.challengeExpiresAt,
+    expiresAt: data.expiresAt,
+    scheduledEndsAt: data.scheduledEndsAt instanceof Timestamp ? data.scheduledEndsAt : undefined,
+    openedAt: data.openedAt instanceof Timestamp ? data.openedAt : undefined,
+    pinRotationMode: 'session',
+    ...normalizePolicy(data),
+  };
+}
+
 async function listOpenSessions(): Promise<AttendanceSession[]> {
   const firestore = requireDb();
   const snapshot = await getDocs(query(
@@ -119,8 +201,8 @@ async function listOpenSessions(): Promise<AttendanceSession[]> {
     where('status', '==', 'open'),
   ));
   return snapshot.docs
-    .map((item) => ({ id: item.id, ...item.data() } as AttendanceSession))
-    .filter((session) => session.expiresAt instanceof Timestamp)
+    .map((item) => normalizeSession(item.id, item.data()))
+    .filter((item): item is AttendanceSession => item !== null)
     .sort((a, b) => b.expiresAt.toMillis() - a.expiresAt.toMillis());
 }
 
@@ -154,9 +236,7 @@ async function readSessionPin(sessionId: string): Promise<string> {
     'private', 'config',
   ));
   const pin = secretSnapshot.data()?.pin;
-  if (typeof pin !== 'string' || !/^\d{4}$/.test(pin)) {
-    throw new Error('Phiên đang mở không có PIN hợp lệ. Hãy đóng phiên và tạo lại.');
-  }
+  if (typeof pin !== 'string' || !/^\d{4}$/.test(pin)) throw new Error('Phiên đang mở không có PIN hợp lệ. Hãy đóng phiên và tạo lại.');
   return pin;
 }
 
@@ -164,73 +244,101 @@ export async function recoverActiveAttendanceSession(): Promise<AttendanceAdminS
   const active = await closeExpiredOrDuplicateSessions(await listOpenSessions());
   if (!active) return null;
   const pin = await readSessionPin(active.id);
-
-  if (!(active.challengeExpiresAt instanceof Timestamp) || active.challengeExpiresAt.toMillis() <= Date.now()) {
-    const next = await rotateAttendanceChallenge(active.id, Number(active.slot || 0) + 1);
-    return { ...active, ...next, slot: Number(active.slot || 0) + 1, pin };
+  if (active.challengeExpiresAt.toMillis() <= Date.now()) {
+    const next = await rotateAttendanceChallenge(active.id, active.slot + 1);
+    return { ...active, ...next, slot: active.slot + 1, pin };
   }
   return { ...active, pin };
 }
 
-export async function openAttendanceSession(title: string): Promise<AttendanceAdminState> {
+export async function openAttendanceSession(
+  title: string,
+  presetId: AttendancePolicyPresetId = 'qr_pin_photo',
+  overrides?: Partial<Pick<AttendancePolicy, 'durationMinutes' | 'lateGraceMinutes'>>,
+): Promise<AttendanceAdminState> {
   const firestore = requireDb();
   const existing = await closeExpiredOrDuplicateSessions(await listOpenSessions());
   if (existing) throw new Error(`Đang có phiên “${existing.title}”. Hãy đóng phiên hiện tại trước khi mở phiên mới.`);
 
+  const preset = ATTENDANCE_POLICY_PRESETS[presetId];
+  const durationMinutes = Math.min(180, Math.max(1, Math.round(overrides?.durationMinutes ?? preset.durationMinutes)));
+  const lateGraceMinutes = Math.min(30, Math.max(0, Math.round(overrides?.lateGraceMinutes ?? preset.lateGraceMinutes)));
   const id = crypto.randomUUID();
   const pin = randomPin();
   const currentChallengeId = randomId();
   const now = Date.now();
-  const expiresAt = Timestamp.fromMillis(now + SESSION_DURATION_MINUTES * 60_000);
+  const scheduledEndsAt = Timestamp.fromMillis(now + durationMinutes * 60_000);
+  const expiresAt = Timestamp.fromMillis(now + (durationMinutes + lateGraceMinutes) * 60_000);
   const challengeExpiresAt = Timestamp.fromMillis(now + QR_ROTATION_MS);
   const sessionRef = doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', id);
+  const sessionTitle = title.trim() || 'Điểm danh trên lớp';
   const batch = writeBatch(firestore);
   batch.set(sessionRef, {
-    title: title.trim() || 'Điểm danh trên lớp', status: 'open', slot: 0,
-    currentChallengeId, challengeExpiresAt, rotationMs: QR_ROTATION_MS,
-    pinRotationMode: 'session', openedAt: serverTimestamp(), expiresAt,
+    title: sessionTitle,
+    status: 'open',
+    slot: 0,
+    currentChallengeId,
+    challengeExpiresAt,
+    rotationMs: QR_ROTATION_MS,
+    pinRotationMode: 'session',
+    openedAt: serverTimestamp(),
+    scheduledEndsAt,
+    expiresAt,
+    policyPreset: presetId,
+    allowPinOnly: preset.allowPinOnly,
+    requireQr: preset.requireQr,
+    requirePhoto: preset.requirePhoto,
+    durationMinutes,
+    lateGraceMinutes,
   });
   batch.set(doc(sessionRef, 'private', 'config'), {
     pin,
     pinProof: await pinProof(id, pin),
     pinRotationMode: 'session',
+    policyPreset: presetId,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
   await batch.commit();
   return {
     id,
-    title: title.trim() || 'Điểm danh trên lớp',
+    title: sessionTitle,
     status: 'open',
     slot: 0,
     currentChallengeId,
     challengeExpiresAt,
+    scheduledEndsAt,
     expiresAt,
     pinRotationMode: 'session',
+    policyPreset: presetId,
+    allowPinOnly: preset.allowPinOnly,
+    requireQr: preset.requireQr,
+    requirePhoto: preset.requirePhoto,
+    durationMinutes,
+    lateGraceMinutes,
     pin,
   };
 }
 
-export async function rotateAttendanceChallenge(
-  sessionId: string,
-  slot: number,
-): Promise<{ currentChallengeId: string; challengeExpiresAt: Timestamp }> {
+export async function rotateAttendanceChallenge(sessionId: string, slot: number): Promise<{ currentChallengeId: string; challengeExpiresAt: Timestamp }> {
   const firestore = requireDb();
   const currentChallengeId = randomId();
   const challengeExpiresAt = Timestamp.fromMillis(Date.now() + QR_ROTATION_MS);
-  await updateDoc(
-    doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId),
-    { currentChallengeId, challengeExpiresAt, slot, rotatedAt: serverTimestamp() },
-  );
+  await updateDoc(doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId), {
+    currentChallengeId,
+    challengeExpiresAt,
+    slot,
+    rotatedAt: serverTimestamp(),
+  });
   return { currentChallengeId, challengeExpiresAt };
 }
 
 export async function closeAttendanceSession(sessionId: string): Promise<void> {
   const firestore = requireDb();
-  await updateDoc(
-    doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId),
-    { status: 'closed', closedAt: serverTimestamp() },
-  );
+  await updateDoc(doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId), {
+    status: 'closed',
+    closedAt: serverTimestamp(),
+  });
 }
 
 export async function claimAttendanceChallenge(sessionId: string, challengeId: string, profile: AccessProfile): Promise<AttendanceClaim> {
@@ -241,9 +349,7 @@ export async function claimAttendanceChallenge(sessionId: string, challengeId: s
     challengeId,
     email: profile.email,
   }, 1);
-  if (!result.claimId || !result.sessionId || !result.sessionTitle || !result.expiresAt) {
-    throw new Error('Backend không trả về claim hợp lệ.');
-  }
+  if (!result.claimId || !result.sessionId || !result.sessionTitle || !result.expiresAt) throw new Error('Backend không trả về claim hợp lệ.');
   return {
     claimId: result.claimId,
     sessionId: result.sessionId,
@@ -252,12 +358,25 @@ export async function claimAttendanceChallenge(sessionId: string, challengeId: s
   };
 }
 
-export async function completeAttendanceClaim(claim: AttendanceClaim, pin: string, profile: AccessProfile, photo: Blob, requestId: string): Promise<void> {
+export async function completeAttendanceClaim(
+  claim: AttendanceClaim,
+  pin: string,
+  profile: AccessProfile,
+  photo: Blob,
+  requestId: string,
+): Promise<void> {
   await callGateway({
-    action: 'completeAttendance', courseId: ACTIVE_COURSE_ID, claimId: claim.claimId,
-    requestId, pin: pin.trim(), email: profile.email,
-    studentId: profile.studentId || 'TEST-STUDENT', fullName: profile.fullName,
-    classCode: profile.classCode, mimeType: 'image/jpeg', photoSize: photo.size,
+    action: 'completeAttendance',
+    courseId: ACTIVE_COURSE_ID,
+    claimId: claim.claimId,
+    requestId,
+    pin: pin.trim(),
+    email: profile.email,
+    studentId: profile.studentId || 'TEST-STUDENT',
+    fullName: profile.fullName,
+    classCode: profile.classCode,
+    mimeType: 'image/jpeg',
+    photoSize: photo.size,
     fileBase64: await blobToBase64(photo),
   }, 3);
 }
@@ -280,11 +399,16 @@ function receiptFromSnapshot(
   };
 }
 
-export async function recordAttendanceByPin(sessionOrId: AttendanceSession | string, pin: string, profile: AccessProfile): Promise<PinAttendanceReceipt> {
+export async function recordAttendanceByPin(
+  sessionOrId: AttendanceSession | string,
+  pin: string,
+  profile: AccessProfile,
+): Promise<PinAttendanceReceipt> {
   const firestore = requireDb();
   if (!auth?.currentUser) throw new Error('Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
   const sessionId = typeof sessionOrId === 'string' ? sessionOrId : sessionOrId.id;
   const sessionTitle = typeof sessionOrId === 'string' ? 'Phiên điểm danh' : sessionOrId.title;
+  if (typeof sessionOrId !== 'string' && !sessionOrId.allowPinOnly) throw new Error('Phiên này không cho phép điểm danh PIN-only.');
   const normalizedPin = pin.trim();
   if (!/^\d{4}$/.test(normalizedPin)) throw new Error('PIN phải gồm đúng 4 chữ số.');
 
@@ -314,7 +438,7 @@ export async function recordAttendanceByPin(sessionOrId: AttendanceSession | str
     const repeated = await getDoc(recordRef);
     if (repeated.exists()) return receiptFromSnapshot(sessionId, sessionTitle, repeated, true);
     const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
-    if (code.includes('permission-denied')) throw new Error('PIN không đúng hoặc phiên điểm danh đã đóng.');
+    if (code.includes('permission-denied')) throw new Error('PIN không đúng, chính sách không cho phép PIN-only hoặc phiên đã đóng.');
     if (code.includes('unavailable') || !navigator.onLine) throw new Error('Mạng đang không ổn định. Hãy kiểm tra kết nối và gửi lại.');
     throw error;
   }
@@ -327,8 +451,10 @@ export function observeOpenAttendanceSessions(callback: (sessions: AttendanceSes
   if (!db) { callback([]); return () => undefined; }
   return onSnapshot(collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'), (snapshot) => {
     const now = Date.now();
-    callback(snapshot.docs.map((item) => ({ id: item.id, ...item.data() } as AttendanceSession))
-      .filter((session) => session.status === 'open' && session.expiresAt instanceof Timestamp && session.expiresAt.toMillis() > now)
+    callback(snapshot.docs
+      .map((item) => normalizeSession(item.id, item.data()))
+      .filter((item): item is AttendanceSession => item !== null)
+      .filter((session) => session.status === 'open' && session.expiresAt.toMillis() > now)
       .sort((a, b) => b.expiresAt.toMillis() - a.expiresAt.toMillis()));
   });
 }
