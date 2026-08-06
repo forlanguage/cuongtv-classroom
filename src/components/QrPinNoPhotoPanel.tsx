@@ -17,9 +17,12 @@ export function QrPinNoPhotoPanel({ profile }: { profile: AccessProfile }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [done, setDone] = useState(false);
-  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const chooseRef = useRef<HTMLInputElement | null>(null);
+  const cameraRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => observeOpenAttendanceSessions(setSessions), []);
+  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
   const eligible = useMemo(() => sessions.filter((session) => session.requireQr && !session.requirePhoto), [sessions]);
 
   async function acceptQr(value: string) {
@@ -35,7 +38,10 @@ export function QrPinNoPhotoPanel({ profile }: { profile: AccessProfile }) {
 
   async function handleFile(file: File | undefined) {
     if (!file) return;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(URL.createObjectURL(file));
     setBusy(true);
+    setMessage('Đang đọc mã QR từ ảnh vừa chọn…');
     try { await acceptQr(await decodeQrFromImageFile(file)); }
     catch (error) { setMessage(error instanceof Error ? error.message : 'Không thể đọc QR.'); }
     finally { setBusy(false); }
@@ -59,9 +65,14 @@ export function QrPinNoPhotoPanel({ profile }: { profile: AccessProfile }) {
     <span className="panel-label">QR + PIN</span>
     <h2>Điểm danh QR + PIN không ảnh</h2>
     {!claim && <>
-      <p>Chụp hoặc chọn ảnh QR của phiên. Sau khi QR được backend xác minh, chỉ cần nhập PIN.</p>
-      <input ref={fileRef} type="file" accept="image/*" capture="environment" hidden onChange={(event) => { void handleFile(event.target.files?.[0]); event.target.value = ''; }} />
-      <button disabled={busy} onClick={() => fileRef.current?.click()}>{busy ? 'Đang đọc QR…' : 'Chụp / chọn ảnh QR'}</button>
+      <p>Chọn ảnh QR có sẵn hoặc chụp ảnh mới. Ảnh sẽ được xem trước trước khi chuyển sang nhập PIN.</p>
+      <input ref={chooseRef} type="file" accept="image/*" hidden onChange={(event) => { void handleFile(event.target.files?.[0]); event.target.value = ''; }} />
+      <input ref={cameraRef} type="file" accept="image/*" capture="environment" hidden onChange={(event) => { void handleFile(event.target.files?.[0]); event.target.value = ''; }} />
+      <div className="attendance-controls">
+        <button disabled={busy} onClick={() => chooseRef.current?.click()}>Chọn ảnh QR</button>
+        <button disabled={busy} className="secondary-button" onClick={() => cameraRef.current?.click()}>Chụp ảnh QR</button>
+      </div>
+      {previewUrl && <figure className="qr-image-preview-card"><img className="photo-preview qr-image-preview" src={previewUrl} alt="Ảnh QR vừa chọn" /><figcaption>{busy ? 'Đang nhận dạng QR…' : 'Ảnh QR vừa chọn. Có thể chọn hoặc chụp lại nếu mã chưa rõ.'}</figcaption></figure>}
     </>}
     {claim && !done && <div className="qr-no-photo-form">
       <strong>{selected?.title}</strong>
