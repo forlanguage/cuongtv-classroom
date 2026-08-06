@@ -162,11 +162,11 @@ export async function completeAttendanceClaim(claim: AttendanceClaim, pin: strin
   }, 3);
 }
 
-function receiptFromSnapshot(session: AttendanceSession, snapshot: Awaited<ReturnType<typeof getDoc>>, alreadyRecorded: boolean): PinAttendanceReceipt {
+function receiptFromSnapshot(sessionId: string, sessionTitle: string, snapshot: Awaited<ReturnType<typeof getDoc>>, alreadyRecorded: boolean): PinAttendanceReceipt {
   const data = snapshot.data();
   return {
-    sessionId: session.id,
-    sessionTitle: session.title,
+    sessionId,
+    sessionTitle,
     status: 'recorded',
     statusLabel: 'Đã ghi nhận',
     checkedInAt: data?.checkedInAt instanceof Timestamp ? data.checkedInAt : null,
@@ -174,14 +174,16 @@ function receiptFromSnapshot(session: AttendanceSession, snapshot: Awaited<Retur
   };
 }
 
-export async function recordAttendanceByPin(session: AttendanceSession, pin: string, profile: AccessProfile): Promise<PinAttendanceReceipt> {
+export async function recordAttendanceByPin(sessionOrId: AttendanceSession | string, pin: string, profile: AccessProfile): Promise<PinAttendanceReceipt> {
   if (!db || !auth?.currentUser) throw new Error('Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
+  const sessionId = typeof sessionOrId === 'string' ? sessionOrId : sessionOrId.id;
+  const sessionTitle = typeof sessionOrId === 'string' ? 'Phiên điểm danh' : sessionOrId.title;
   const normalizedPin = pin.trim();
   if (!/^\d{4}$/.test(normalizedPin)) throw new Error('PIN phải gồm đúng 4 chữ số.');
 
-  const recordRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', session.id, 'records', profile.email);
+  const recordRef = doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records', profile.email);
   const existing = await getDoc(recordRef);
-  if (existing.exists()) return receiptFromSnapshot(session, existing, true);
+  if (existing.exists()) return receiptFromSnapshot(sessionId, sessionTitle, existing, true);
 
   try {
     await setDoc(recordRef, {
@@ -190,7 +192,7 @@ export async function recordAttendanceByPin(session: AttendanceSession, pin: str
       studentId: profile.studentId || 'TEST-STUDENT',
       fullName: profile.fullName || '',
       classCode: profile.classCode || '',
-      pinProof: await pinProof(session.id, normalizedPin),
+      pinProof: await pinProof(sessionId, normalizedPin),
       requestId: crypto.randomUUID(),
       checkedInAt: serverTimestamp(),
       status: 'recorded',
@@ -203,19 +205,15 @@ export async function recordAttendanceByPin(session: AttendanceSession, pin: str
     });
   } catch (error) {
     const repeated = await getDoc(recordRef);
-    if (repeated.exists()) return receiptFromSnapshot(session, repeated, true);
+    if (repeated.exists()) return receiptFromSnapshot(sessionId, sessionTitle, repeated, true);
     const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
-    if (code.includes('permission-denied')) {
-      throw new Error('PIN không đúng, PIN vừa thay đổi, hoặc phiên điểm danh đã đóng.');
-    }
-    if (code.includes('unavailable') || !navigator.onLine) {
-      throw new Error('Mạng đang không ổn định. Hãy kiểm tra kết nối và gửi lại.');
-    }
+    if (code.includes('permission-denied')) throw new Error('PIN không đúng, PIN vừa thay đổi, hoặc phiên điểm danh đã đóng.');
+    if (code.includes('unavailable') || !navigator.onLine) throw new Error('Mạng đang không ổn định. Hãy kiểm tra kết nối và gửi lại.');
     throw error;
   }
 
   const saved = await getDoc(recordRef);
-  return receiptFromSnapshot(session, saved, false);
+  return receiptFromSnapshot(sessionId, sessionTitle, saved, false);
 }
 
 export function observeOpenAttendanceSessions(callback: (sessions: AttendanceSession[]) => void): Unsubscribe {
