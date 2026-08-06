@@ -1,0 +1,172 @@
+# REL-01 — Production E2E Execution Record
+
+Issue: #42  
+Branch: `rel/42-rel-01-production-e2e`  
+Target: `v0.6.0`
+
+## Run metadata
+
+| Field | Value |
+|---|---|
+| Environment | `https://forlanguage.github.io/cuongtv-classroom/` |
+| Started | 2026-08-06 |
+| Administrator | `cuongtv@uit.edu.vn` |
+| Student | `cuongtv.ee@gmail.com` |
+| Tester | Cuong Truong Van |
+| Build under test | `41937d7e8c836d9cf7123d15880d3546c9fa262e` |
+| Pages workflow | Run #50 — success |
+| Apps Script | Updated source and deployed production endpoint verified by successful AC-03 execution |
+
+## Preflight
+
+| Check | Status | Evidence / note |
+|---|---|---|
+| Production Pages build | PASS | GitHub Pages Run #50 completed successfully |
+| ATT-12 merge on `main` | PASS | Commit `41937d7e8c836d9cf7123d15880d3546c9fa262e` |
+| Apps Script source updated | PASS | Confirmed by project owner |
+| Apps Script deployed endpoint reachable | PASS | `completeAttendanceWithoutPhoto` completed successfully during AC-03 |
+| Firestore Rules ATT-11 deployed | PASS | Deploy Firestore Rules Run #13 completed successfully |
+| Admin login | PARTIAL PASS | Admin workflows were used successfully during AC-02 and AC-03; full role-isolation checks remain in AC-01 |
+| Student login and active roster | PASS | Student successfully completed AC-02 and AC-03 |
+
+## Static acceptance checks
+
+| Check | Status | Note |
+|---|---|---|
+| Production source compiles | PASS | Pages Run #50 completed successfully |
+| Audit update/delete denied by Rules | PASS (static) | Explicit `allow update, delete: if false` under attendance audit path |
+| Student attendance updates denied | PASS (static) | Attendance record update/delete restricted to admin |
+| Student record read isolated by email | PASS (static) | Read requires authenticated email to equal record document ID |
+| Admin-only audit dashboard mount | PASS (static) | Role-aware mount loads panel only for admin profile |
+| Semester summary admin-only mount | PASS (static) | Role-aware mount loads panel only for admin profile |
+
+Static checks do not replace runtime authorization tests. AC-01, AC-09 and AC-10 remain open until executed with real accounts.
+
+## Completed scenario — AC-02 Stable PIN-only check-in
+
+Status: **PASS**  
+Completed: 2026-08-06 13:09 UTC+7  
+Evidence source: project owner reported `AC-PASS` after executing the production checklist.
+
+Validated behavior:
+
+- Admin opened a PIN-only session.
+- Student submitted the valid PIN successfully.
+- Repeated submission remained idempotent and did not create a duplicate record.
+- Invalid PIN was rejected without replacing the valid record.
+- Admin observed one attendance record.
+- Reload restored the session and existing receipt.
+- No blocking defect was reported.
+
+## Completed scenario — AC-03 QR + PIN without photo
+
+Status: **PASS**  
+Completed: 2026-08-06 13:12 UTC+7  
+Evidence source: project owner reported `AC-03 pass` after production execution.
+
+Validated behavior:
+
+- Admin opened the QR + PIN no-photo policy.
+- Student completed QR verification and PIN verification successfully.
+- No photo evidence was requested.
+- The deployed Apps Script no-photo endpoint was reachable.
+- The attendance record and receipt were created successfully.
+- No blocking defect was reported.
+
+## Active scenario — AC-04 QR + PIN + photo
+
+Status: **IN PROGRESS**  
+Started: 2026-08-06 13:12 UTC+7
+
+### Required execution
+
+1. Admin opens a new session using preset `Đầy đủ — QR + PIN + ảnh`.
+2. Confirm the session policy has `requireQr = true`, `requirePhoto = true`, and `allowPinOnly = false`.
+3. Student signs in and selects the AC-04 session.
+4. Student scans or imports the active QR code.
+5. Enter the valid PIN and continue to photo evidence.
+6. Grant camera permission or select the supported photo-capture method.
+7. Capture a clear test photo and submit the attendance request.
+8. Verify the UI displays a successful receipt and the admin roster shows exactly one record.
+9. Verify the record is consistent with:
+   - `status = present`
+   - `verificationMode = qr_pin_photo`
+   - `evidenceLevel = full`
+   - `qrVerified = true`
+   - `photoProvided = true`
+10. Confirm photo evidence is stored at the expected Drive/backend location and is not publicly exposed.
+11. Retry submission and verify no duplicate attendance record or duplicate authoritative receipt is created.
+12. Reload admin and student pages and verify the record and receipt remain available.
+
+### PASS criteria
+
+- QR, PIN and photo evidence are all required and accepted.
+- The Apps Script full-completion endpoint succeeds.
+- Exactly one `qr_pin_photo` attendance record is created.
+- Photo metadata/evidence is associated with the correct session and student.
+- Retry remains idempotent.
+- No severe browser console or Apps Script error occurs.
+
+### Evidence to record
+
+- Sanitized session title or ID.
+- Camera/photo method used.
+- Confirmation that photo evidence was required.
+- Receipt result and admin row count.
+- Confirmation that the evidence file exists without sharing the photo publicly.
+- Retry result.
+- Any sanitized console or Apps Script error text.
+
+## Scenario results
+
+| ID | Scenario | Priority | Status | Defect | Notes |
+|---|---|---:|---|---|---|
+| AC-01 | Authentication and role isolation | P0 | DEFERRED | — | Remains required before release |
+| AC-02 | Stable PIN-only check-in | P1 | PASS | — | Production checklist completed |
+| AC-03 | QR + PIN without photo | P1 | PASS | — | Production no-photo endpoint verified |
+| AC-04 | QR + PIN + photo | P1 | IN PROGRESS | — | Requires camera/photo permission |
+| AC-05 | Fallback and teacher review | P1 | READY TO RUN | — | |
+| AC-06 | Manual teacher attendance | P1 | READY TO RUN | — | |
+| AC-07 | Realtime roster and missing students | P1 | READY TO RUN | — | |
+| AC-08 | Session CSV export | P1 | READY TO RUN | — | |
+| AC-09 | Student history privacy and accuracy | P0/P1 | READY TO RUN | — | |
+| AC-10 | Append-only audit | P0/P1 | READY TO RUN | — | Rules deployment already confirmed |
+| AC-11 | Semester summary | P1 | READY TO RUN | — | |
+| AC-12 | Session recovery and expiry | P1 | READY TO RUN | — | |
+
+## Defect register
+
+| Defect | Severity | Scenario | Status | Summary |
+|---|---:|---|---|---|
+| — | — | — | — | No defect recorded yet |
+
+## Data reconciliation
+
+### Session CSV
+
+| Session | Dashboard rows | CSV rows | Firestore records | Result |
+|---|---:|---:|---:|---|
+| — | — | — | — | NOT RUN |
+
+### Semester summary
+
+| Metric | Expected | UI | CSV by student | CSV by session | Result |
+|---|---:|---:|---:|---:|---|
+| Students | — | — | — | — | NOT RUN |
+| Sessions | — | — | — | — | NOT RUN |
+| Present | — | — | — | — | NOT RUN |
+| Recorded | — | — | — | — | NOT RUN |
+| Absent | — | — | — | — | NOT RUN |
+| Excused | — | — | — | — | NOT RUN |
+| Rejected | — | — | — | — | NOT RUN |
+| Attendance rate | — | — | — | — | NOT RUN |
+
+## Release recommendation
+
+**Current decision: NOT READY — AC-02 and AC-03 passed, AC-04 is in progress, and AC-01 remains deferred.**
+
+Final decision options:
+
+- READY FOR `v0.6.0`
+- READY WITH DOCUMENTED P2/P3 LIMITATIONS
+- NOT READY — P0/P1 DEFECTS REMAIN
