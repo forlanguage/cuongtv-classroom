@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { observeAuth } from './services/auth';
 import { loadAccessProfile, type AccessProfile } from './services/roster';
-import { QrPinNoPhotoPanel } from './components/QrPinNoPhotoPanel';
+import { HybridAttendancePanel } from './components/HybridAttendancePanel';
+import { HybridEvidenceReviewPanel } from './components/HybridEvidenceReviewPanel';
 import { ManualTeacherAttendancePanel } from './components/ManualTeacherAttendancePanel';
 import './att10.css';
 
@@ -13,8 +14,11 @@ function Att10Mount() {
   }), []);
   if (!profile) return null;
   return <main className="att10-main">
-    {profile.role === 'student' && <QrPinNoPhotoPanel profile={profile} />}
-    {profile.role === 'admin' && <ManualTeacherAttendancePanel />}
+    {profile.role === 'student' && <HybridAttendancePanel profile={profile} />}
+    {profile.role === 'admin' && <>
+      <HybridEvidenceReviewPanel />
+      <ManualTeacherAttendancePanel />
+    </>}
   </main>;
 }
 
