@@ -1,0 +1,13 @@
+.review-table { min-width: 1180px; }
+.review-editor { display: grid; gap: 8px; min-width: 330px; }
+.review-editor input { width: 100%; min-width: 260px; font-size: .9rem; letter-spacing: normal; text-align: left; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.review-actions button, .compact-button { padding: 7px 11px; font-size: .78rem; }
+.danger-button { color: #fecaca; background: rgba(127, 29, 29, .65); }
+.review-note { display: block; max-width: 220px; margin-top: 6px; color: #cbd5e1 !important; white-space: normal; }
+.status-excused { color: #bae6fd; background: rgba(3, 105, 161, .32); }
+.status-rejected { color: #fecaca; background: rgba(127, 29, 29, .32); }
+@media (max-width: 520px) {
+  .review-editor { min-width: 280px; }
+  .review-actions { display: grid; grid-template-columns: 1fr 1fr; }
+}
