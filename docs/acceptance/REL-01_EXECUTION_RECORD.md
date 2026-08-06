@@ -15,7 +15,7 @@ Target: `v0.6.0`
 | Tester | Cuong Truong Van |
 | Build under test | `41937d7e8c836d9cf7123d15880d3546c9fa262e` |
 | Pages workflow | Run #50 — success |
-| Apps Script | User confirmed updated `apps-script/Code.gs`; deployed web-app version is being verified in AC-03 and AC-04 |
+| Apps Script | Updated source and deployed production endpoint verified by successful AC-03 execution |
 
 ## Preflight
 
@@ -24,10 +24,10 @@ Target: `v0.6.0`
 | Production Pages build | PASS | GitHub Pages Run #50 completed successfully |
 | ATT-12 merge on `main` | PASS | Commit `41937d7e8c836d9cf7123d15880d3546c9fa262e` |
 | Apps Script source updated | PASS | Confirmed by project owner |
-| Apps Script deployed endpoint reachable | IN PROGRESS | Verify during AC-03 and AC-04 |
+| Apps Script deployed endpoint reachable | PASS | `completeAttendanceWithoutPhoto` completed successfully during AC-03 |
 | Firestore Rules ATT-11 deployed | PASS | Deploy Firestore Rules Run #13 completed successfully |
-| Admin login | PARTIAL PASS | Admin workflow was used successfully during AC-02; full role-isolation checks remain in AC-01 |
-| Student login and active roster | PASS | Student successfully completed AC-02 PIN-only flow |
+| Admin login | PARTIAL PASS | Admin workflows were used successfully during AC-02 and AC-03; full role-isolation checks remain in AC-01 |
+| Student login and active roster | PASS | Student successfully completed AC-02 and AC-03 |
 
 ## Static acceptance checks
 
@@ -58,57 +58,73 @@ Validated behavior:
 - Reload restored the session and existing receipt.
 - No blocking defect was reported.
 
-## Active scenario — AC-03 QR + PIN without photo
+## Completed scenario — AC-03 QR + PIN without photo
+
+Status: **PASS**  
+Completed: 2026-08-06 13:12 UTC+7  
+Evidence source: project owner reported `AC-03 pass` after production execution.
+
+Validated behavior:
+
+- Admin opened the QR + PIN no-photo policy.
+- Student completed QR verification and PIN verification successfully.
+- No photo evidence was requested.
+- The deployed Apps Script no-photo endpoint was reachable.
+- The attendance record and receipt were created successfully.
+- No blocking defect was reported.
+
+## Active scenario — AC-04 QR + PIN + photo
 
 Status: **IN PROGRESS**  
-Started: 2026-08-06 13:09 UTC+7
+Started: 2026-08-06 13:12 UTC+7
 
 ### Required execution
 
-1. Admin opens a new session using preset `Tiêu chuẩn — QR + PIN`.
-2. Confirm the session policy requires QR and PIN but does not require photo.
-3. Student signs in and selects the new session.
+1. Admin opens a new session using preset `Đầy đủ — QR + PIN + ảnh`.
+2. Confirm the session policy has `requireQr = true`, `requirePhoto = true`, and `allowPinOnly = false`.
+3. Student signs in and selects the AC-04 session.
 4. Student scans or imports the active QR code.
-5. Confirm the QR claim is accepted and the UI advances to PIN verification without requesting camera/photo evidence.
-6. Enter the valid PIN and submit.
-7. Verify a successful receipt is displayed.
-8. Verify the admin roster shows exactly one record for the student.
+5. Enter the valid PIN and continue to photo evidence.
+6. Grant camera permission or select the supported photo-capture method.
+7. Capture a clear test photo and submit the attendance request.
+8. Verify the UI displays a successful receipt and the admin roster shows exactly one record.
 9. Verify the record is consistent with:
    - `status = present`
-   - `verificationMode = qr_pin_no_photo`
-   - `evidenceLevel = qr_verified`
+   - `verificationMode = qr_pin_photo`
+   - `evidenceLevel = full`
    - `qrVerified = true`
-   - `photoProvided = false`
-10. Attempt to reuse the same QR claim or submit the flow again and verify no duplicate record is created.
-11. Try an expired or stale QR after rotation, when practical, and verify it is rejected.
-12. Reload admin and student pages and verify the record/receipt remains visible.
+   - `photoProvided = true`
+10. Confirm photo evidence is stored at the expected Drive/backend location and is not publicly exposed.
+11. Retry submission and verify no duplicate attendance record or duplicate authoritative receipt is created.
+12. Reload admin and student pages and verify the record and receipt remain available.
 
 ### PASS criteria
 
-- The deployed Apps Script action `completeAttendanceWithoutPhoto` is reachable.
-- QR identity/session binding and PIN verification both succeed.
-- The no-photo preset never requests or requires photo evidence.
-- Exactly one `qr_pin_no_photo` record is created.
-- Reused, expired or stale QR claims are rejected.
-- No severe browser console error occurs.
+- QR, PIN and photo evidence are all required and accepted.
+- The Apps Script full-completion endpoint succeeds.
+- Exactly one `qr_pin_photo` attendance record is created.
+- Photo metadata/evidence is associated with the correct session and student.
+- Retry remains idempotent.
+- No severe browser console or Apps Script error occurs.
 
 ### Evidence to record
 
 - Sanitized session title or ID.
-- Whether the QR was scanned or imported.
-- Confirmation that no photo prompt appeared.
+- Camera/photo method used.
+- Confirmation that photo evidence was required.
 - Receipt result and admin row count.
-- Retry/stale-QR result.
-- Any console or Apps Script error text with tokens, QR claims, PINs and personal data removed.
+- Confirmation that the evidence file exists without sharing the photo publicly.
+- Retry result.
+- Any sanitized console or Apps Script error text.
 
 ## Scenario results
 
 | ID | Scenario | Priority | Status | Defect | Notes |
 |---|---|---:|---|---|---|
-| AC-01 | Authentication and role isolation | P0 | DEFERRED | — | Owner requested proceeding to AC-02; AC-01 remains required before release |
-| AC-02 | Stable PIN-only check-in | P1 | PASS | — | Production checklist completed; owner reported AC-PASS |
-| AC-03 | QR + PIN without photo | P1 | IN PROGRESS | — | Verifies deployed Apps Script no-photo endpoint |
-| AC-04 | QR + PIN + photo | P1 | READY TO RUN | — | Requires camera/photo permission |
+| AC-01 | Authentication and role isolation | P0 | DEFERRED | — | Remains required before release |
+| AC-02 | Stable PIN-only check-in | P1 | PASS | — | Production checklist completed |
+| AC-03 | QR + PIN without photo | P1 | PASS | — | Production no-photo endpoint verified |
+| AC-04 | QR + PIN + photo | P1 | IN PROGRESS | — | Requires camera/photo permission |
 | AC-05 | Fallback and teacher review | P1 | READY TO RUN | — | |
 | AC-06 | Manual teacher attendance | P1 | READY TO RUN | — | |
 | AC-07 | Realtime roster and missing students | P1 | READY TO RUN | — | |
@@ -147,7 +163,7 @@ Started: 2026-08-06 13:09 UTC+7
 
 ## Release recommendation
 
-**Current decision: NOT READY — AC-02 passed, AC-03 is in progress, and AC-01 remains deferred.**
+**Current decision: NOT READY — AC-02 and AC-03 passed, AC-04 is in progress, and AC-01 remains deferred.**
 
 Final decision options:
 
