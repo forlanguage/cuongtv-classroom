@@ -42,12 +42,51 @@ Target: `v0.6.0`
 
 Static checks do not replace runtime authorization tests. AC-01, AC-09 and AC-10 remain open until executed with real accounts.
 
+## Active scenario — AC-02 Stable PIN-only check-in
+
+Status: **IN PROGRESS**  
+Started: 2026-08-06 12:49 UTC+7
+
+### Required execution
+
+1. Admin signs in and opens a new attendance session with preset `Nhanh — PIN-only`.
+2. Record the session title and expiry time. Do not store the PIN in GitHub evidence.
+3. Student signs in with the active roster account.
+4. Student enters the valid PIN and submits once.
+5. Verify the UI shows a successful receipt and the admin realtime roster shows exactly one attendance record.
+6. Submit the same PIN again from the same student account.
+7. Verify no duplicate record is created and the original receipt/record remains authoritative.
+8. Verify the record fields shown by the UI are consistent with:
+   - `status = recorded`
+   - `verificationMode = pin_only`
+   - `evidenceLevel = limited`
+   - `reviewStatus = needs_review`
+9. Enter an invalid PIN and verify the attempt is rejected without creating or replacing a record.
+10. Reload both admin and student pages and verify the session and existing receipt recover correctly.
+
+### PASS criteria
+
+- One student produces exactly one attendance document for the session.
+- Repeated valid submission is idempotent.
+- Invalid PIN does not create or modify attendance data.
+- The record is marked for teacher review and appears realtime in the admin roster.
+- No severe browser console error occurs.
+
+### Evidence to record
+
+- Session title or sanitized session ID.
+- First submission result.
+- Repeated submission result.
+- Invalid PIN result.
+- Admin roster row count before and after.
+- Any console error text with tokens, PINs and personal data removed.
+
 ## Scenario results
 
 | ID | Scenario | Priority | Status | Defect | Notes |
 |---|---|---:|---|---|---|
-| AC-01 | Authentication and role isolation | P0 | READY TO RUN | — | Manual runbook prepared |
-| AC-02 | Stable PIN-only check-in | P1 | READY TO RUN | — | Run after AC-01 |
+| AC-01 | Authentication and role isolation | P0 | DEFERRED | — | Owner requested proceeding to AC-02; AC-01 remains required before release |
+| AC-02 | Stable PIN-only check-in | P1 | IN PROGRESS | — | Production manual execution started |
 | AC-03 | QR + PIN without photo | P1 | READY TO RUN | — | Also verifies deployed Apps Script endpoint |
 | AC-04 | QR + PIN + photo | P1 | READY TO RUN | — | Requires camera/photo permission |
 | AC-05 | Fallback and teacher review | P1 | READY TO RUN | — | |
@@ -88,7 +127,7 @@ Static checks do not replace runtime authorization tests. AC-01, AC-09 and AC-10
 
 ## Release recommendation
 
-**Current decision: NOT READY — automated preflight passed, but production account scenarios have not yet been executed.**
+**Current decision: NOT READY — AC-02 is in progress and AC-01 remains deferred.**
 
 Final decision options:
 
