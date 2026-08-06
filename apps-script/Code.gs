@@ -4,6 +4,7 @@ const CONFIG = {
   maxSubmissionJsonBytes: 2 * 1024 * 1024,
   challengeGraceMs: 30 * 1000,
   claimTtlSeconds: 180,
+  evidenceTtlSeconds: 300,
 };
 
 function doGet() {
@@ -20,6 +21,8 @@ function doPost(event) {
       case 'completeAttendance': return jsonResponse_(completeAttendance_(payload, identity));
       case 'completeAttendanceWithoutPhoto': return jsonResponse_(completeAttendanceWithoutPhoto_(payload, identity));
       case 'recordAttendanceByPin': return jsonResponse_(recordAttendanceByPin_(payload, identity));
+      case 'startHybridAttendance': return jsonResponse_(startHybridAttendance_(payload, identity));
+      case 'submitHybridAttendance': return jsonResponse_(submitHybridAttendance_(payload, identity));
       case 'createSubmissionEvidence': return jsonResponse_(createSubmissionEvidence_(payload, identity));
       default: throw new Error('Unsupported action.');
     }
@@ -87,16 +90,13 @@ function readClaimForCompletion_(payload, identity) {
 }
 
 function consumeClaim_(cache, claim, requestId, result) {
-  claim.status = 'consumed';
-  claim.requestId = requestId;
-  claim.result = result;
+  claim.status = 'consumed'; claim.requestId = requestId; claim.result = result;
   cache.put('claim:' + claim.claimId, JSON.stringify(claim), 600);
 }
 
 function completeAttendance_(payload, identity) {
   requireFields_(payload, ['courseId', 'claimId', 'requestId', 'pin', 'studentId', 'fileBase64']);
-  const lock = LockService.getScriptLock();
-  lock.waitLock(15000);
+  const lock = LockService.getScriptLock(); lock.waitLock(15000);
   try {
     const claimState = readClaimForCompletion_(payload, identity);
     if (claimState.repeated) return claimState.claim.result;
@@ -110,13 +110,7 @@ function completeAttendance_(payload, identity) {
     const existing = firestoreGet_(recordPath, true);
     if (existing && existing.requestId === payload.requestId) return { ok: true, checkedInAt: existing.checkedInAt, alreadyRecorded: true };
     if (existing) throw new Error('Sinh viên đã được ghi nhận trong phiên này.');
-    const bytes = Utilities.base64Decode(payload.fileBase64);
-    if (bytes.length === 0 || bytes.length > CONFIG.maxAttendanceBytes) throw new Error('Ảnh điểm danh phải nhỏ hơn 500 KB.');
-    const folder = ensureFolderPath_([sanitizeName_(claim.courseId), 'attendance', sanitizeName_(claim.sessionId)]);
-    const fileName = sanitizeName_(payload.studentId) + '_' + sanitizeName_(payload.requestId) + '.jpg';
-    const prior = folder.getFilesByName(fileName);
-    const file = prior.hasNext() ? prior.next() : folder.createFile(Utilities.newBlob(bytes, 'image/jpeg', fileName));
-    const downloadUrl = 'https://drive.google.com/uc?export=download&id=' + file.getId();
+    const file = saveAttendanceImage_(claim.courseId, claim.sessionId, payload.studentId, payload.requestId + '_face', payload.fileBase64);
     const checkedInAt = new Date().toISOString();
     firestorePatch_(recordPath, {
       email: identity.email, uid: identity.uid, studentId: payload.studentId,
@@ -124,8 +118,8 @@ function completeAttendance_(payload, identity) {
       challengeId: claim.challengeId, claimId: payload.claimId, requestId: payload.requestId,
       verificationMode: 'qr_pin_photo', evidenceLevel: 'full',
       qrVerified: true, photoProvided: true,
-      photoFileId: file.getId(), photoFileName: file.getName(), photoDownloadUrl: downloadUrl,
-      photoSize: bytes.length, photoProvider: 'google-drive', checkedInAt: checkedInAt,
+      photoFileId: file.getId(), photoFileName: file.getName(), photoDownloadUrl: driveDownloadUrl_(file),
+      photoSize: file.getSize(), photoProvider: 'google-drive', checkedInAt: checkedInAt,
       status: 'present', statusLabel: 'Có mặt', reviewStatus: 'not_reviewed',
     });
     const result = { ok: true, checkedInAt: checkedInAt, alreadyRecorded: false };
@@ -136,8 +130,7 @@ function completeAttendance_(payload, identity) {
 
 function completeAttendanceWithoutPhoto_(payload, identity) {
   requireFields_(payload, ['courseId', 'claimId', 'requestId', 'pin', 'studentId']);
-  const lock = LockService.getScriptLock();
-  lock.waitLock(15000);
+  const lock = LockService.getScriptLock(); lock.waitLock(15000);
   try {
     const claimState = readClaimForCompletion_(payload, identity);
     if (claimState.repeated) return claimState.claim.result;
@@ -169,8 +162,7 @@ function completeAttendanceWithoutPhoto_(payload, identity) {
 
 function recordAttendanceByPin_(payload, identity) {
   requireFields_(payload, ['courseId', 'sessionId', 'requestId', 'pin', 'studentId']);
-  const lock = LockService.getScriptLock();
-  lock.waitLock(15000);
+  const lock = LockService.getScriptLock(); lock.waitLock(15000);
   try {
     requireActiveStudent_(payload.courseId, identity);
     const sessionPath = 'courses/' + payload.courseId + '/attendanceSessions/' + payload.sessionId;
@@ -192,6 +184,112 @@ function recordAttendanceByPin_(payload, identity) {
     return { ok: true, checkedInAt: checkedInAt, status: 'recorded' };
   } finally { lock.releaseLock(); }
 }
+
+function startHybridAttendance_(payload, identity) {
+  requireFields_(payload, ['courseId', 'sessionId', 'pin']);
+  requireActiveStudent_(payload.courseId, identity);
+  const sessionPath = 'courses/' + payload.courseId + '/attendanceSessions/' + payload.sessionId;
+  const session = firestoreGet_(sessionPath);
+  const secret = firestoreGet_(sessionPath + '/private/config');
+  validateSessionAndPin_(session, secret, payload.pin);
+  let qrVerified = false;
+  if (payload.challengeId) {
+    if (session.currentChallengeId !== payload.challengeId) throw new Error('QR redirect đã hết hạn hoặc không đúng phiên.');
+    if (!session.challengeExpiresAt || Date.parse(session.challengeExpiresAt) + CONFIG.challengeGraceMs < Date.now()) throw new Error('QR redirect đã hết hạn.');
+    qrVerified = true;
+  }
+  const tokenId = Utilities.getUuid();
+  const expiresAt = new Date(Date.now() + CONFIG.evidenceTtlSeconds * 1000).toISOString();
+  CacheService.getScriptCache().put('evidence:' + tokenId, JSON.stringify({
+    tokenId: tokenId, courseId: payload.courseId, sessionId: payload.sessionId,
+    uid: identity.uid, email: identity.email, qrVerified: qrVerified,
+    challengeId: qrVerified ? payload.challengeId : '', status: 'started', expiresAt: expiresAt,
+  }), CONFIG.evidenceTtlSeconds);
+  return { ok: true, tokenId: tokenId, sessionId: payload.sessionId, sessionTitle: session.title || 'Điểm danh', qrVerified: qrVerified, expiresAt: expiresAt };
+}
+
+function submitHybridAttendance_(payload, identity) {
+  requireFields_(payload, ['courseId', 'tokenId', 'requestId', 'studentId']);
+  const lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    const cache = CacheService.getScriptCache();
+    const raw = cache.get('evidence:' + payload.tokenId);
+    if (!raw) throw new Error('Phiên evidence đã hết hạn. Hãy xác nhận PIN lại.');
+    const token = JSON.parse(raw);
+    if (token.uid !== identity.uid || token.email !== identity.email || token.courseId !== payload.courseId) throw new Error('Evidence token không thuộc tài khoản hiện tại.');
+    if (Date.parse(token.expiresAt) <= Date.now()) throw new Error('Evidence token đã hết hạn.');
+    if (token.status === 'consumed') {
+      if (token.requestId === payload.requestId) return token.result;
+      throw new Error('Evidence token đã được sử dụng.');
+    }
+    requireActiveStudent_(token.courseId, identity);
+    const sessionPath = 'courses/' + token.courseId + '/attendanceSessions/' + token.sessionId;
+    const session = firestoreGet_(sessionPath);
+    if (!session || session.status !== 'open' || !session.expiresAt || Date.parse(session.expiresAt) <= Date.now()) throw new Error('Phiên điểm danh đã đóng hoặc hết hạn.');
+    const recordPath = sessionPath + '/records/' + encodeURIComponent(identity.email);
+    const existing = firestoreGet_(recordPath, true);
+    if (existing) return { ok: true, checkedInAt: existing.checkedInAt, alreadyRecorded: true, verificationMode: existing.verificationMode || 'recorded' };
+
+    const noCameraReason = String(payload.noCameraReason || '').trim();
+    let qrFile = null;
+    let faceFile = null;
+    if (!noCameraReason) {
+      if (!token.qrVerified && !payload.qrFileBase64) throw new Error('Thiếu ảnh QR evidence.');
+      if (!payload.faceFileBase64) throw new Error('Thiếu ảnh FACE evidence.');
+      if (payload.qrFileBase64) qrFile = saveAttendanceImage_(token.courseId, token.sessionId, payload.studentId, payload.requestId + '_qr', payload.qrFileBase64);
+      faceFile = saveAttendanceImage_(token.courseId, token.sessionId, payload.studentId, payload.requestId + '_face', payload.faceFileBase64);
+    }
+
+    let verificationMode = '';
+    let evidenceLevel = '';
+    if (noCameraReason) {
+      verificationMode = token.qrVerified ? 'qr_redirect_pin_no_camera' : 'pin_no_camera';
+      evidenceLevel = token.qrVerified ? 'qr_verified_no_camera' : 'limited_no_camera';
+    } else if (token.qrVerified) {
+      verificationMode = 'qr_redirect_pin_face';
+      evidenceLevel = 'qr_verified_face_review';
+    } else {
+      verificationMode = 'pin_qr_face_deferred';
+      evidenceLevel = 'deferred_review';
+    }
+
+    const checkedInAt = new Date().toISOString();
+    firestorePatch_(recordPath, {
+      email: identity.email, uid: identity.uid, studentId: payload.studentId,
+      fullName: payload.fullName || '', classCode: payload.classCode || '',
+      requestId: payload.requestId, evidenceTokenId: payload.tokenId,
+      challengeId: token.challengeId || '',
+      verificationMode: verificationMode, evidenceLevel: evidenceLevel,
+      qrVerified: token.qrVerified === true, qrPhotoProvided: !!qrFile,
+      photoProvided: !!faceFile, noCameraReason: noCameraReason,
+      qrPhotoFileId: qrFile ? qrFile.getId() : '',
+      qrPhotoFileName: qrFile ? qrFile.getName() : '',
+      qrPhotoDownloadUrl: qrFile ? driveDownloadUrl_(qrFile) : '',
+      photoFileId: faceFile ? faceFile.getId() : '',
+      photoFileName: faceFile ? faceFile.getName() : '',
+      photoDownloadUrl: faceFile ? driveDownloadUrl_(faceFile) : '',
+      photoProvider: (qrFile || faceFile) ? 'google-drive' : '',
+      checkedInAt: checkedInAt, status: 'recorded', statusLabel: 'Đã ghi nhận',
+      reviewStatus: 'needs_review',
+      note: noCameraReason ? 'Thiết bị không có camera hoặc camera không hoạt động; cần xác nhận trực tiếp.' : 'Evidence đã gửi; chờ giảng viên hậu kiểm.',
+    });
+    const result = { ok: true, checkedInAt: checkedInAt, alreadyRecorded: false, verificationMode: verificationMode };
+    token.status = 'consumed'; token.requestId = payload.requestId; token.result = result;
+    cache.put('evidence:' + token.tokenId, JSON.stringify(token), 600);
+    return result;
+  } finally { lock.releaseLock(); }
+}
+
+function saveAttendanceImage_(courseId, sessionId, studentId, suffix, fileBase64) {
+  const bytes = Utilities.base64Decode(fileBase64);
+  if (!bytes.length || bytes.length > CONFIG.maxAttendanceBytes) throw new Error('Mỗi ảnh evidence phải nhỏ hơn 500 KB.');
+  const folder = ensureFolderPath_([sanitizeName_(courseId), 'attendance', sanitizeName_(sessionId)]);
+  const fileName = sanitizeName_(studentId) + '_' + sanitizeName_(suffix) + '.jpg';
+  const prior = folder.getFilesByName(fileName);
+  return prior.hasNext() ? prior.next() : folder.createFile(Utilities.newBlob(bytes, 'image/jpeg', fileName));
+}
+
+function driveDownloadUrl_(file) { return 'https://drive.google.com/uc?export=download&id=' + file.getId(); }
 
 function validateSessionAndPin_(session, secret, pin) {
   if (!session || session.status !== 'open' || !session.expiresAt || Date.parse(session.expiresAt) <= Date.now()) throw new Error('Phiên điểm danh đã đóng hoặc hết hạn.');
@@ -265,7 +363,7 @@ function createSubmissionEvidence_(payload, identity) {
   const pdfFile = folder.createFile(sourceFile.getAs(MimeType.PDF).setName(pdfName)); sourceFile.setTrashed(true);
   try { pdfFile.addViewer(identity.email); } catch (shareError) { console.warn('Could not add viewer: ' + shareError); }
   const viewUrl = 'https://drive.google.com/file/d/' + pdfFile.getId() + '/view';
-  const downloadUrl = 'https://drive.google.com/uc?export=download&id=' + pdfFile.getId();
+  const downloadUrl = driveDownloadUrl_(pdfFile);
   const emailResult = sendSubmissionReceipt_(payload, identity.email, viewUrl, downloadUrl);
   return { ok: true, fileId: pdfFile.getId(), fileName: pdfFile.getName(), viewUrl: viewUrl, downloadUrl: downloadUrl, emailStatus: emailResult.status, emailSentAt: emailResult.sentAt };
 }
