@@ -58,7 +58,8 @@ export function AttendanceAuditPanel() {
   }, [sessionId]);
 
   useEffect(() => {
-    if (!db || !sessionId || !auth?.currentUser) return undefined;
+    const actor = auth?.currentUser;
+    if (!db || !sessionId || !actor) return undefined;
     const firestore = requireAuditDb();
     previousRef.current = new Map();
     initializedRef.current = false;
@@ -106,8 +107,8 @@ export function AttendanceAuditPanel() {
             recordEmail: current.email,
             studentId: current.studentId,
             fullName: current.fullName,
-            actorEmail: auth.currentUser?.email || '',
-            actorUid: auth.currentUser?.uid || '',
+            actorEmail: actor.email || '',
+            actorUid: actor.uid,
             previousStatus: previous?.status || 'missing',
             newStatus: current.status,
             previousReviewStatus: previous?.reviewStatus || 'not_reviewed',
