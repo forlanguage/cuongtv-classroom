@@ -8,6 +8,22 @@ import { ACTIVE_COURSE_ID, loadAccessProfile } from './services/roster';
 import { AdminAttendanceRoster } from './components/AdminAttendanceRoster';
 import { AttendanceCsvExport } from './components/AttendanceCsvExport';
 
+interface AttendanceSessionSummary {
+  id: string;
+  status: string;
+  expiresAt: Timestamp | null;
+  title: string;
+}
+
+function normalizeSession(id: string, data: Record<string, unknown>): AttendanceSessionSummary {
+  return {
+    id,
+    status: typeof data.status === 'string' ? data.status : '',
+    expiresAt: data.expiresAt instanceof Timestamp ? data.expiresAt : null,
+    title: typeof data.title === 'string' && data.title.trim() ? data.title : 'Phiên điểm danh',
+  };
+}
+
 function AdminRosterMount() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [sessionId, setSessionId] = useState('');
@@ -22,15 +38,21 @@ function AdminRosterMount() {
   }), []);
 
   useEffect(() => {
-    if (!isAdmin || !db) { setSessionId(''); return undefined; }
+    if (!isAdmin || !db) {
+      setSessionId('');
+      setSessionTitle('Phiên điểm danh');
+      return undefined;
+    }
+
     return onSnapshot(collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'), (snapshot) => {
       const now = Date.now();
       const active = snapshot.docs
-        .map((item) => ({ id: item.id, ...item.data() }))
-        .filter((item) => item.status === 'open' && item.expiresAt instanceof Timestamp && item.expiresAt.toMillis() > now)
-        .sort((a, b) => (b.expiresAt as Timestamp).toMillis() - (a.expiresAt as Timestamp).toMillis())[0];
-      setSessionId(active?.id || '');
-      setSessionTitle(typeof active?.title === 'string' ? active.title : 'Phiên điểm danh');
+        .map((item) => normalizeSession(item.id, item.data()))
+        .filter((item) => item.status === 'open' && item.expiresAt !== null && item.expiresAt.toMillis() > now)
+        .sort((a, b) => (b.expiresAt?.toMillis() ?? 0) - (a.expiresAt?.toMillis() ?? 0))[0];
+
+      setSessionId(active?.id ?? '');
+      setSessionTitle(active?.title ?? 'Phiên điểm danh');
     });
   }, [isAdmin]);
 
