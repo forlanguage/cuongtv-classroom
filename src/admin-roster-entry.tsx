@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { Timestamp, collection, onSnapshot } from 'firebase/firestore';
+import './teacher-review.css';
 import { observeAuth } from './services/auth';
 import { db } from './services/firebase';
 import { ACTIVE_COURSE_ID, loadAccessProfile } from './services/roster';
