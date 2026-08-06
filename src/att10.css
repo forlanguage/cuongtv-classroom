@@ -1,0 +1,6 @@
+.att10-main { max-width: 1180px; margin: 0 auto 48px; padding: 0 24px; }
+.qr-no-photo-panel, .manual-teacher-panel { margin-top: 24px; }
+.qr-no-photo-form, .manual-teacher-form { display: grid; gap: 12px; max-width: 680px; }
+.qr-no-photo-form input { max-width: 180px; font-size: 1.35rem; letter-spacing: .24em; text-align: center; }
+.manual-teacher-form select, .manual-teacher-form input { width: 100%; }
+@media (max-width: 700px) { .att10-main { padding: 0 14px; } }
