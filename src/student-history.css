@@ -1,0 +1,134 @@
+.student-history-main {
+  max-width: 1180px;
+  margin: 0 auto 48px;
+  padding: 0 24px;
+}
+
+.student-history-panel {
+  margin-top: 24px;
+}
+
+.history-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 20px;
+}
+
+.history-heading h2 {
+  margin: 8px 0 6px;
+}
+
+.history-heading p {
+  margin: 0;
+  color: #64748b;
+}
+
+.history-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(86px, 1fr));
+  gap: 8px;
+  min-width: 500px;
+}
+
+.history-summary span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  font-size: 0.82rem;
+  color: #475569;
+}
+
+.history-summary b {
+  font-size: 1.2rem;
+  color: #0f172a;
+}
+
+.history-list {
+  display: grid;
+  gap: 12px;
+}
+
+.history-item {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.3fr) minmax(280px, 1fr);
+  gap: 12px 20px;
+  padding: 16px;
+  border: 1px solid #dbe4f0;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.history-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-main span,
+.history-item small {
+  color: #64748b;
+}
+
+.history-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.history-meta > span:not(.record-badge) {
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #334155;
+  font-size: 0.82rem;
+}
+
+.history-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid #94a3b8;
+  background: #f8fafc;
+  color: #334155;
+}
+
+.history-item small {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 800px) {
+  .student-history-main {
+    padding: 0 14px;
+  }
+
+  .history-heading {
+    flex-direction: column;
+  }
+
+  .history-summary {
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .history-item {
+    grid-template-columns: 1fr;
+  }
+
+  .history-meta {
+    justify-content: flex-start;
+  }
+
+  .history-note,
+  .history-item small {
+    grid-column: 1;
+  }
+}
