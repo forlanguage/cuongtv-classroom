@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Timestamp, collection, onSnapshot } from 'firebase/firestore';
-import { db } from '../services/firebase';
+import { Timestamp, collection, doc, onSnapshot, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { auth, db } from '../services/firebase';
 import { ACTIVE_COURSE_ID } from '../services/roster';
 
 type AttendanceFilter = 'all' | 'present' | 'recorded' | 'missing' | 'needs_review';
+type ReviewDecision = 'approved' | 'rejected' | 'excused';
 
 interface RosterStudent {
   email: string;
@@ -21,6 +22,9 @@ interface AttendanceRecord {
   statusLabel: string;
   verificationMode: string;
   reviewStatus: string;
+  reviewNote: string;
+  reviewedAt: Timestamp | null;
+  reviewedBy: string;
   missing: boolean;
 }
 
@@ -30,6 +34,12 @@ const filterLabels: Record<AttendanceFilter, string> = {
   recorded: 'PIN-only',
   missing: 'Chưa điểm danh',
   needs_review: 'Cần hậu kiểm',
+};
+
+const decisionConfig: Record<ReviewDecision, { status: string; statusLabel: string; reviewStatus: string; label: string }> = {
+  approved: { status: 'present', statusLabel: 'Có mặt', reviewStatus: 'approved', label: 'Duyệt có mặt' },
+  rejected: { status: 'rejected', statusLabel: 'Từ chối', reviewStatus: 'rejected', label: 'Từ chối' },
+  excused: { status: 'excused', statusLabel: 'Có phép', reviewStatus: 'approved', label: 'Xác nhận có phép' },
 };
 
 function normalizeEmail(value: unknown): string {
@@ -47,6 +57,9 @@ function normalizeAttendance(id: string, data: Record<string, unknown>): Attenda
     statusLabel: typeof data.statusLabel === 'string' ? data.statusLabel : 'Đã ghi nhận',
     verificationMode: typeof data.verificationMode === 'string' ? data.verificationMode : 'unknown',
     reviewStatus: typeof data.reviewStatus === 'string' ? data.reviewStatus : 'not_required',
+    reviewNote: typeof data.reviewNote === 'string' ? data.reviewNote : '',
+    reviewedAt: data.reviewedAt instanceof Timestamp ? data.reviewedAt : null,
+    reviewedBy: typeof data.reviewedBy === 'string' ? data.reviewedBy : '',
     missing: false,
   };
 }
@@ -73,6 +86,9 @@ function missingRecord(student: RosterStudent): AttendanceRecord {
     statusLabel: 'Chưa điểm danh',
     verificationMode: 'none',
     reviewStatus: 'not_required',
+    reviewNote: '',
+    reviewedAt: null,
+    reviewedBy: '',
     missing: true,
   };
 }
@@ -100,6 +116,9 @@ export function AdminAttendanceRoster({ sessionId }: { sessionId: string }) {
   const [rosterLoading, setRosterLoading] = useState(true);
   const [attendanceLoading, setAttendanceLoading] = useState(true);
   const [error, setError] = useState('');
+  const [reviewingId, setReviewingId] = useState('');
+  const [reviewNote, setReviewNote] = useState('');
+  const [reviewBusy, setReviewBusy] = useState(false);
 
   useEffect(() => {
     if (!db) {
@@ -150,19 +169,13 @@ export function AdminAttendanceRoster({ sessionId }: { sessionId: string }) {
       const record = byEmail.get(student.email);
       if (!record) return missingRecord(student);
       byEmail.delete(student.email);
-      return {
-        ...record,
-        studentId: student.studentId || record.studentId,
-        fullName: student.fullName || record.fullName,
-      };
+      return { ...record, studentId: student.studentId || record.studentId, fullName: student.fullName || record.fullName };
     });
-
-    const unmatched = Array.from(byEmail.values());
-    return [...joined, ...unmatched].sort((a, b) => {
+    return [...joined, ...Array.from(byEmail.values())].sort((a, b) => {
       if (a.missing !== b.missing) return a.missing ? 1 : -1;
       if (!a.missing && !b.missing) {
-        const timeDifference = (b.checkedInAt?.toMillis() ?? 0) - (a.checkedInAt?.toMillis() ?? 0);
-        if (timeDifference !== 0) return timeDifference;
+        const difference = (b.checkedInAt?.toMillis() ?? 0) - (a.checkedInAt?.toMillis() ?? 0);
+        if (difference !== 0) return difference;
       }
       return a.studentId.localeCompare(b.studentId, 'vi');
     });
@@ -172,7 +185,7 @@ export function AdminAttendanceRoster({ sessionId }: { sessionId: string }) {
     all: roster.length,
     checkedIn: rows.filter((record) => !record.missing).length,
     present: rows.filter((record) => record.status === 'present').length,
-    recorded: rows.filter((record) => record.status === 'recorded' || record.verificationMode === 'pin_only').length,
+    recorded: rows.filter((record) => record.status === 'recorded' || record.reviewStatus === 'needs_review').length,
     missing: rows.filter((record) => record.missing).length,
     needs_review: rows.filter((record) => record.reviewStatus === 'needs_review').length,
   }), [roster.length, rows]);
@@ -187,47 +200,74 @@ export function AdminAttendanceRoster({ sessionId }: { sessionId: string }) {
 
   const filtered = useMemo(() => rows.filter((record) => {
     if (filter === 'present') return record.status === 'present';
-    if (filter === 'recorded') return record.status === 'recorded' || record.verificationMode === 'pin_only';
+    if (filter === 'recorded') return record.status === 'recorded' || record.reviewStatus === 'needs_review';
     if (filter === 'missing') return record.missing;
     if (filter === 'needs_review') return record.reviewStatus === 'needs_review';
     return true;
   }), [filter, rows]);
 
+  async function submitReview(record: AttendanceRecord, decision: ReviewDecision) {
+    if (!db || !auth?.currentUser || record.missing) return;
+    setReviewBusy(true);
+    setError('');
+    try {
+      const config = decisionConfig[decision];
+      await updateDoc(doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', sessionId, 'records', record.email), {
+        status: config.status,
+        statusLabel: config.statusLabel,
+        reviewStatus: config.reviewStatus,
+        reviewDecision: decision,
+        reviewNote: reviewNote.trim(),
+        reviewedAt: serverTimestamp(),
+        reviewedBy: auth.currentUser.email || auth.currentUser.uid,
+        updatedAt: serverTimestamp(),
+      });
+      setReviewingId('');
+      setReviewNote('');
+    } catch (reviewError) {
+      setError(reviewError instanceof Error ? reviewError.message : 'Không thể lưu kết quả hậu kiểm.');
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
   const loading = rosterLoading || attendanceLoading;
 
   return <div className="attendance-roster">
     <div className="roster-heading">
-      <div><h3>Danh sách lớp và điểm danh realtime</h3><p>Roster được ghép trực tiếp với kết quả của phiên đang mở.</p></div>
+      <div><h3>Danh sách lớp và điểm danh realtime</h3><p>Giảng viên có thể hậu kiểm các bản ghi PIN-only ngay trong bảng.</p></div>
       <div className="roster-summary roster-summary-five">
-        <span>Sĩ số <b>{summary.all}</b></span>
-        <span>Đã ghi nhận <b>{summary.checkedIn}</b></span>
-        <span>Đầy đủ <b>{summary.present}</b></span>
-        <span>PIN-only <b>{summary.recorded}</b></span>
+        <span>Sĩ số <b>{summary.all}</b></span><span>Đã ghi nhận <b>{summary.checkedIn}</b></span>
+        <span>Đầy đủ <b>{summary.present}</b></span><span>PIN-only <b>{summary.recorded}</b></span>
         <span>Chưa điểm danh <b>{summary.missing}</b></span>
       </div>
     </div>
 
     <div className="roster-filters" role="group" aria-label="Lọc danh sách điểm danh">
-      {(Object.keys(filterLabels) as AttendanceFilter[]).map((item) => <button
-        key={item}
-        type="button"
-        className={filter === item ? 'filter-button active' : 'filter-button'}
-        onClick={() => setFilter(item)}
-      >{filterLabels[item]} ({filterCounts[item]})</button>)}
+      {(Object.keys(filterLabels) as AttendanceFilter[]).map((item) => <button key={item} type="button"
+        className={filter === item ? 'filter-button active' : 'filter-button'} onClick={() => setFilter(item)}>
+        {filterLabels[item]} ({filterCounts[item]})
+      </button>)}
     </div>
 
     {loading && <p>Đang tải roster và danh sách điểm danh…</p>}
     {error && <p className="notice">{error}</p>}
     {!loading && !error && !filtered.length && <p>Không có sinh viên phù hợp với bộ lọc này.</p>}
-    {!!filtered.length && <div className="roster-table-wrap"><table className="roster-table">
-      <thead><tr><th>MSSV</th><th>Họ tên</th><th>Thời gian</th><th>Trạng thái</th><th>Xác minh</th><th>Hậu kiểm</th></tr></thead>
+    {!!filtered.length && <div className="roster-table-wrap"><table className="roster-table review-table">
+      <thead><tr><th>MSSV</th><th>Họ tên</th><th>Thời gian</th><th>Trạng thái</th><th>Xác minh</th><th>Hậu kiểm</th><th>Thao tác</th></tr></thead>
       <tbody>{filtered.map((record) => <tr key={record.id} className={record.missing ? 'missing-row' : undefined}>
-        <td><strong>{record.studentId}</strong><small>{record.email}</small></td>
-        <td>{record.fullName}</td>
+        <td><strong>{record.studentId}</strong><small>{record.email}</small></td><td>{record.fullName}</td>
         <td>{record.checkedInAt ? record.checkedInAt.toDate().toLocaleTimeString('vi-VN') : '—'}</td>
         <td><span className={`record-badge status-${record.status}`}>{record.statusLabel}</span></td>
         <td>{verificationLabel(record.verificationMode)}</td>
-        <td><span className={`record-badge review-${record.reviewStatus}`}>{reviewLabel(record.reviewStatus)}</span></td>
+        <td><span className={`record-badge review-${record.reviewStatus}`}>{reviewLabel(record.reviewStatus)}</span>{record.reviewNote && <small className="review-note">{record.reviewNote}</small>}</td>
+        <td>{!record.missing && <>{reviewingId === record.id ? <div className="review-editor">
+          <input value={reviewNote} maxLength={300} placeholder="Ghi chú hậu kiểm" onChange={(event) => setReviewNote(event.target.value)} />
+          <div className="review-actions"><button disabled={reviewBusy} onClick={() => void submitReview(record, 'approved')}>Duyệt</button>
+            <button className="secondary-button" disabled={reviewBusy} onClick={() => void submitReview(record, 'excused')}>Có phép</button>
+            <button className="danger-button" disabled={reviewBusy} onClick={() => void submitReview(record, 'rejected')}>Từ chối</button>
+            <button className="secondary-button" disabled={reviewBusy} onClick={() => { setReviewingId(''); setReviewNote(''); }}>Hủy</button></div>
+        </div> : <button className="secondary-button compact-button" onClick={() => { setReviewingId(record.id); setReviewNote(record.reviewNote); }}>Hậu kiểm</button>}</>}</td>
       </tr>)}</tbody>
     </table></div>}
   </div>;
