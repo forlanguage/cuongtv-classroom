@@ -87,7 +87,6 @@ service cloud.firestore {
             && request.resource.data.pinProof.size() == 64
             && request.resource.data.pinProof == get(sessionSecretPath(courseId, sessionId)).data.pinProof
             && get(sessionPath(courseId, sessionId)).data.status == 'open'
-            && get(sessionPath(courseId, sessionId)).data.allowPinOnly == true
             && request.time < get(sessionPath(courseId, sessionId)).data.expiresAt;
 
           allow update, delete: if isAdmin();
