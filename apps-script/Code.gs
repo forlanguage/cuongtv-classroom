@@ -18,6 +18,7 @@ function doPost(event) {
     switch (payload.action) {
       case 'claimAttendanceChallenge': return jsonResponse_(claimAttendanceChallenge_(payload, identity));
       case 'completeAttendance': return jsonResponse_(completeAttendance_(payload, identity));
+      case 'completeAttendanceWithoutPhoto': return jsonResponse_(completeAttendanceWithoutPhoto_(payload, identity));
       case 'recordAttendanceByPin': return jsonResponse_(recordAttendanceByPin_(payload, identity));
       case 'createSubmissionEvidence': return jsonResponse_(createSubmissionEvidence_(payload, identity));
       default: throw new Error('Unsupported action.');
@@ -70,22 +71,36 @@ function claimAttendanceChallenge_(payload, identity) {
   return { ok: true, claimId: claimId, sessionId: payload.sessionId, sessionTitle: session.title || 'Điểm danh', expiresAt: expiresAt };
 }
 
+function readClaimForCompletion_(payload, identity) {
+  const cache = CacheService.getScriptCache();
+  const rawClaim = cache.get('claim:' + payload.claimId);
+  if (!rawClaim) throw new Error('Claim đã hết hạn. Hãy quét QR mới.');
+  const claim = JSON.parse(rawClaim);
+  if (claim.status === 'consumed') {
+    if (claim.requestId === payload.requestId) return { cache: cache, claim: claim, repeated: true };
+    throw new Error('Claim đã được sử dụng.');
+  }
+  if (claim.uid !== identity.uid || claim.email !== identity.email) throw new Error('Claim không thuộc tài khoản hiện tại.');
+  if (claim.courseId !== payload.courseId) throw new Error('Claim không thuộc lớp này.');
+  if (Date.parse(claim.expiresAt) <= Date.now()) throw new Error('Claim đã hết hạn.');
+  return { cache: cache, claim: claim, repeated: false };
+}
+
+function consumeClaim_(cache, claim, requestId, result) {
+  claim.status = 'consumed';
+  claim.requestId = requestId;
+  claim.result = result;
+  cache.put('claim:' + claim.claimId, JSON.stringify(claim), 600);
+}
+
 function completeAttendance_(payload, identity) {
   requireFields_(payload, ['courseId', 'claimId', 'requestId', 'pin', 'studentId', 'fileBase64']);
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
-    const cache = CacheService.getScriptCache();
-    const rawClaim = cache.get('claim:' + payload.claimId);
-    if (!rawClaim) throw new Error('Claim đã hết hạn. Hãy quét QR mới.');
-    const claim = JSON.parse(rawClaim);
-    if (claim.status === 'consumed') {
-      if (claim.requestId === payload.requestId) return claim.result;
-      throw new Error('Claim đã được sử dụng.');
-    }
-    if (claim.uid !== identity.uid || claim.email !== identity.email) throw new Error('Claim không thuộc tài khoản hiện tại.');
-    if (claim.courseId !== payload.courseId) throw new Error('Claim không thuộc lớp này.');
-    if (Date.parse(claim.expiresAt) <= Date.now()) throw new Error('Claim đã hết hạn.');
+    const claimState = readClaimForCompletion_(payload, identity);
+    if (claimState.repeated) return claimState.claim.result;
+    const claim = claimState.claim;
     requireActiveStudent_(claim.courseId, identity);
     const sessionPath = 'courses/' + claim.courseId + '/attendanceSessions/' + claim.sessionId;
     const session = firestoreGet_(sessionPath);
@@ -93,7 +108,7 @@ function completeAttendance_(payload, identity) {
     validateSessionAndPin_(session, secret, payload.pin);
     const recordPath = sessionPath + '/records/' + encodeURIComponent(identity.email);
     const existing = firestoreGet_(recordPath, true);
-    if (existing && existing.requestId === payload.requestId) return { ok: true, checkedInAt: existing.checkedInAt };
+    if (existing && existing.requestId === payload.requestId) return { ok: true, checkedInAt: existing.checkedInAt, alreadyRecorded: true };
     if (existing) throw new Error('Sinh viên đã được ghi nhận trong phiên này.');
     const bytes = Utilities.base64Decode(payload.fileBase64);
     if (bytes.length === 0 || bytes.length > CONFIG.maxAttendanceBytes) throw new Error('Ảnh điểm danh phải nhỏ hơn 500 KB.');
@@ -108,13 +123,46 @@ function completeAttendance_(payload, identity) {
       fullName: payload.fullName || '', classCode: payload.classCode || '',
       challengeId: claim.challengeId, claimId: payload.claimId, requestId: payload.requestId,
       verificationMode: 'qr_pin_photo', evidenceLevel: 'full',
+      qrVerified: true, photoProvided: true,
       photoFileId: file.getId(), photoFileName: file.getName(), photoDownloadUrl: downloadUrl,
       photoSize: bytes.length, photoProvider: 'google-drive', checkedInAt: checkedInAt,
-      status: 'present', reviewStatus: 'not_reviewed',
+      status: 'present', statusLabel: 'Có mặt', reviewStatus: 'not_reviewed',
     });
-    const result = { ok: true, checkedInAt: checkedInAt };
-    claim.status = 'consumed'; claim.requestId = payload.requestId; claim.result = result;
-    cache.put('claim:' + payload.claimId, JSON.stringify(claim), 600);
+    const result = { ok: true, checkedInAt: checkedInAt, alreadyRecorded: false };
+    consumeClaim_(claimState.cache, claim, payload.requestId, result);
+    return result;
+  } finally { lock.releaseLock(); }
+}
+
+function completeAttendanceWithoutPhoto_(payload, identity) {
+  requireFields_(payload, ['courseId', 'claimId', 'requestId', 'pin', 'studentId']);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const claimState = readClaimForCompletion_(payload, identity);
+    if (claimState.repeated) return claimState.claim.result;
+    const claim = claimState.claim;
+    requireActiveStudent_(claim.courseId, identity);
+    const sessionPath = 'courses/' + claim.courseId + '/attendanceSessions/' + claim.sessionId;
+    const session = firestoreGet_(sessionPath);
+    const secret = firestoreGet_(sessionPath + '/private/config');
+    validateSessionAndPin_(session, secret, payload.pin);
+    if (session.requireQr !== true || session.requirePhoto === true) throw new Error('Phiên này không áp dụng QR + PIN không ảnh.');
+    const recordPath = sessionPath + '/records/' + encodeURIComponent(identity.email);
+    const existing = firestoreGet_(recordPath, true);
+    if (existing) return { ok: true, checkedInAt: existing.checkedInAt, alreadyRecorded: true };
+    const checkedInAt = new Date().toISOString();
+    firestorePatch_(recordPath, {
+      email: identity.email, uid: identity.uid, studentId: payload.studentId,
+      fullName: payload.fullName || '', classCode: payload.classCode || '',
+      challengeId: claim.challengeId, claimId: payload.claimId, requestId: payload.requestId,
+      verificationMode: 'qr_pin_no_photo', evidenceLevel: 'qr_verified',
+      qrVerified: true, photoProvided: false, checkedInAt: checkedInAt,
+      status: 'present', statusLabel: 'Có mặt', reviewStatus: 'not_reviewed',
+      note: 'QR và PIN đã được xác minh; policy không yêu cầu ảnh.',
+    });
+    const result = { ok: true, checkedInAt: checkedInAt, alreadyRecorded: false };
+    consumeClaim_(claimState.cache, claim, payload.requestId, result);
     return result;
   } finally { lock.releaseLock(); }
 }
@@ -138,7 +186,7 @@ function recordAttendanceByPin_(payload, identity) {
       fullName: payload.fullName || '', classCode: payload.classCode || '',
       requestId: payload.requestId, verificationMode: 'pin_only', evidenceLevel: 'limited',
       qrVerified: false, photoProvided: false, checkedInAt: checkedInAt,
-      status: 'recorded', reviewStatus: 'needs_review',
+      status: 'recorded', statusLabel: 'Đã ghi nhận', reviewStatus: 'needs_review',
       note: 'Đã ghi nhận bằng PIN do không thể sử dụng QR hoặc camera.',
     });
     return { ok: true, checkedInAt: checkedInAt, status: 'recorded' };

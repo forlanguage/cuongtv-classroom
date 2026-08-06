@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Timestamp, collection, doc, onSnapshot } from 'firebase/firestore';
+import { Timestamp, collection, doc, onSnapshot, type Firestore } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { ACTIVE_COURSE_ID } from '../services/roster';
 
@@ -22,6 +22,11 @@ interface HistoryRecord {
   reviewStatus: string;
   reviewNote: string;
   reviewedAt: Timestamp | null;
+}
+
+function requireDb(): Firestore {
+  if (!db) throw new Error('Firestore chưa được cấu hình.');
+  return db;
 }
 
 function normalizedSession(id: string, data: Record<string, unknown>): SessionSummary {
@@ -61,10 +66,10 @@ export function StudentAttendanceHistory({ email }: { email: string }) {
       setLoading(false);
       return undefined;
     }
-
+    const firestore = requireDb();
     setError('');
     return onSnapshot(
-      collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'),
+      collection(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'),
       (snapshot) => {
         const latest = snapshot.docs
           .map((item) => normalizedSession(item.id, item.data()))
@@ -85,12 +90,12 @@ export function StudentAttendanceHistory({ email }: { email: string }) {
       setLoading(false);
       return undefined;
     }
-
+    const firestore = requireDb();
     setLoading(true);
     const next = new Map<string, HistoryRecord>();
     let resolved = 0;
     const stops = sessions.map((session) => onSnapshot(
-      doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', session.id, 'records', email),
+      doc(firestore, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', session.id, 'records', email),
       (snapshot) => {
         if (snapshot.exists()) {
           const data = snapshot.data();
