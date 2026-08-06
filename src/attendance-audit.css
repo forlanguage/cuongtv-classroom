@@ -1,0 +1,97 @@
+.attendance-audit-main {
+  max-width: 1180px;
+  margin: 0 auto 48px;
+  padding: 0 24px;
+}
+
+.audit-panel {
+  margin-top: 24px;
+}
+
+.audit-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.audit-heading h2 {
+  margin: 8px 0 6px;
+}
+
+.audit-heading p {
+  margin: 0;
+  color: #64748b;
+}
+
+.audit-heading select {
+  min-width: 260px;
+}
+
+.audit-list {
+  display: grid;
+  gap: 12px;
+}
+
+.audit-item {
+  display: grid;
+  grid-template-columns: minmax(230px, 1.2fr) auto;
+  gap: 10px 18px;
+  padding: 16px;
+  border: 1px solid #dbe4f0;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.audit-item > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.audit-item span,
+.audit-item small {
+  color: #64748b;
+}
+
+.audit-transition {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.audit-transition code {
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: #eef2f7;
+}
+
+.audit-item p,
+.audit-item small {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+@media (max-width: 700px) {
+  .attendance-audit-main {
+    padding: 0 14px;
+  }
+
+  .audit-heading {
+    flex-direction: column;
+  }
+
+  .audit-heading select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .audit-item {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-transition {
+    justify-content: flex-start;
+  }
+}
