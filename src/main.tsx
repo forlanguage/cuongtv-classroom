@@ -15,6 +15,7 @@ import {
   observeOpenAttendanceSessions,
   openAttendanceSession,
   recordAttendanceByPin,
+  recoverActiveAttendanceSession,
   rotateAttendanceChallenge,
   type AttendanceAdminState,
   type AttendanceClaim,
@@ -40,6 +41,12 @@ type StudentStep = 'list' | 'scan' | 'pin' | 'photo' | 'pinOnly' | 'done';
 type BarcodeDetectorInstance = { detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>> };
 declare global { interface Window { BarcodeDetector?: new (options: { formats: string[] }) => BarcodeDetectorInstance; } }
 
+async function qrForChallenge(challengeId: string): Promise<string> {
+  const url = new URL(window.location.origin + window.location.pathname);
+  url.searchParams.set('challenge', challengeId);
+  return QRCode.toDataURL(url.toString(), { width: 320, margin: 2 });
+}
+
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<AccessProfile | null>(null);
@@ -47,6 +54,8 @@ function App() {
   const [message, setMessage] = useState('');
   const [attendanceTitle, setAttendanceTitle] = useState('Điểm danh trên lớp');
   const [adminSession, setAdminSession] = useState<AttendanceAdminState | null>(null);
+  const [adminRecovering, setAdminRecovering] = useState(false);
+  const [remainingSeconds, setRemainingSeconds] = useState(0);
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [attendanceCount, setAttendanceCount] = useState(0);
   const [attendanceBusy, setAttendanceBusy] = useState(false);
@@ -69,6 +78,7 @@ function App() {
     let active = true;
     void (async () => {
       setProfile(null);
+      setAdminSession(null);
       if (!user) return;
       setLoadingProfile(true);
       try {
@@ -81,20 +91,56 @@ function App() {
     })();
     return () => { active = false; };
   }, [user]);
+
   useEffect(() => profile?.role === 'student' ? observeOpenAttendanceSessions(setOpenSessions) : undefined, [profile?.role]);
+  useEffect(() => {
+    if (profile?.role !== 'admin') return;
+    let active = true;
+    setAdminRecovering(true);
+    void (async () => {
+      try {
+        const recovered = await recoverActiveAttendanceSession();
+        if (!active || !recovered) return;
+        setAdminSession(recovered);
+        setAttendanceTitle(recovered.title);
+        setQrDataUrl(await qrForChallenge(recovered.currentChallengeId));
+        setMessage(`Đã khôi phục phiên “${recovered.title}” sau khi tải lại trang.`);
+      } catch (error) {
+        if (active) setMessage(error instanceof Error ? error.message : 'Không thể khôi phục phiên điểm danh.');
+      } finally {
+        if (active) setAdminRecovering(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [profile?.role]);
+
   useEffect(() => () => { stopCamera(cameraStream); if (scanTimerRef.current) clearTimeout(scanTimerRef.current); }, [cameraStream]);
-  useEffect(() => adminSession ? observeAttendanceCount(adminSession.id, setAttendanceCount) : undefined, [adminSession]);
+  useEffect(() => adminSession ? observeAttendanceCount(adminSession.id, setAttendanceCount) : undefined, [adminSession?.id]);
+  useEffect(() => {
+    if (!adminSession) { setRemainingSeconds(0); return; }
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((adminSession.expiresAt.toMillis() - Date.now()) / 1000));
+      setRemainingSeconds(remaining);
+      if (remaining === 0) {
+        setAdminSession(null);
+        setQrDataUrl('');
+        setMessage('Phiên điểm danh đã hết hạn.');
+      }
+    };
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [adminSession?.id, adminSession?.expiresAt]);
   useEffect(() => {
     if (!adminSession) return;
     let slot = adminSession.slot;
     const timer = window.setInterval(() => void (async () => {
       try {
+        if (adminSession.expiresAt.toMillis() <= Date.now()) return;
         slot += 1;
         const next = await rotateAttendanceChallenge(adminSession.id, slot);
         const updated = { ...adminSession, ...next, slot };
-        const url = new URL(window.location.origin + window.location.pathname);
-        url.searchParams.set('challenge', updated.currentChallengeId);
-        setQrDataUrl(await QRCode.toDataURL(url.toString(), { width: 320, margin: 2 }));
+        setQrDataUrl(await qrForChallenge(updated.currentChallengeId));
         setAdminSession(updated);
       } catch (error) { setMessage(error instanceof Error ? error.message : 'Không thể đổi challenge.'); }
     })(), QR_ROTATION_MS);
@@ -110,9 +156,7 @@ function App() {
     setAttendanceBusy(true); setMessage('');
     try {
       const session = await openAttendanceSession(attendanceTitle);
-      const url = new URL(window.location.origin + window.location.pathname);
-      url.searchParams.set('challenge', session.currentChallengeId);
-      setQrDataUrl(await QRCode.toDataURL(url.toString(), { width: 320, margin: 2 }));
+      setQrDataUrl(await qrForChallenge(session.currentChallengeId));
       setAdminSession(session); setAttendanceCount(0);
     } catch (e) { setMessage(e instanceof Error ? e.message : 'Không thể mở phiên.'); }
     finally { setAttendanceBusy(false); }
@@ -120,7 +164,7 @@ function App() {
   async function handleCloseAttendance() {
     if (!adminSession) return;
     setAttendanceBusy(true);
-    try { await closeAttendanceSession(adminSession.id); setAdminSession(null); setQrDataUrl(''); }
+    try { await closeAttendanceSession(adminSession.id); setAdminSession(null); setQrDataUrl(''); setRemainingSeconds(0); }
     catch (e) { setMessage(e instanceof Error ? e.message : 'Không thể đóng phiên.'); }
     finally { setAttendanceBusy(false); }
   }
@@ -203,7 +247,7 @@ function App() {
   return <main>
     <header className="hero"><div><span className="eyebrow">IT006.Q24 · CUONGTV CLASSROOM</span><h1>Kiến trúc máy tính — học kỳ 2, năm học 2025–2026</h1><p>Điểm danh ưu tiên QR + PIN + ảnh, nhưng không chặn sinh viên khi camera gặp sự cố.</p><div className="actions">{user ? <><button onClick={() => void logout()}>Đăng xuất</button><span>{loadingProfile ? 'Đang kiểm tra…' : profile ? `${profile.fullName || profile.email} · ${profile.role === 'admin' ? 'Quản trị viên' : 'Sinh viên'}` : user.email}</span></> : <button onClick={() => void handleLogin()}>Đăng nhập bằng Google</button>}</div>{message && <p className="notice">{message}</p>}</div><aside className="status-card"><strong>Trạng thái hệ thống</strong><dl><div><dt>Lớp</dt><dd>IT006.Q24</dd></div><div><dt>QR challenge</dt><dd>60 giây</dd></div><div><dt>PIN-only</dt><dd>Đã ghi nhận</dd></div><div><dt>Firebase</dt><dd>{firebaseConfigured ? 'Đã cấu hình' : 'Chờ cấu hình'}</dd></div></dl></aside></header>
 
-    {profile?.role === 'admin' && <section className="workflow dashboard-panel"><span className="panel-label">ADMIN DASHBOARD</span><h2>Xin chào, {profile.fullName || 'Giảng viên'}</h2><div className="attendance-box"><h3>Điểm danh QR + PIN + ảnh; PIN-only dự phòng</h3>{!adminSession ? <div className="attendance-controls"><input value={attendanceTitle} onChange={(e) => setAttendanceTitle(e.target.value)} /><button disabled={attendanceBusy} onClick={() => void handleOpenAttendance()}>Mở phiên 5 phút</button></div> : <div className="qr-panel"><div><strong>{adminSession.title}</strong><p>PIN hiện tại: <b className="pin-code">{adminSession.pin}</b></p><p>Đã ghi nhận: <b>{attendanceCount}</b></p><button onClick={() => void handleCloseAttendance()}>Đóng phiên</button></div>{qrDataUrl && <img src={qrDataUrl} alt="QR điểm danh" />}</div>}</div></section>}
+    {profile?.role === 'admin' && <section className="workflow dashboard-panel"><span className="panel-label">ADMIN DASHBOARD</span><h2>Xin chào, {profile.fullName || 'Giảng viên'}</h2><div className="attendance-box"><h3>Điểm danh QR + PIN + ảnh; PIN-only dự phòng</h3>{adminRecovering ? <p>Đang kiểm tra phiên điểm danh đang mở…</p> : !adminSession ? <div className="attendance-controls"><input value={attendanceTitle} onChange={(e) => setAttendanceTitle(e.target.value)} /><button disabled={attendanceBusy} onClick={() => void handleOpenAttendance()}>Mở phiên 5 phút</button></div> : <div className="qr-panel"><div><strong>{adminSession.title}</strong><p>PIN hiện tại: <b className="pin-code">{adminSession.pin}</b></p><p>Còn lại: <b>{Math.floor(remainingSeconds / 60)}:{String(remainingSeconds % 60).padStart(2, '0')}</b></p><p>Đã ghi nhận: <b>{attendanceCount}</b></p><button disabled={attendanceBusy} onClick={() => void handleCloseAttendance()}>Đóng phiên</button></div>{qrDataUrl && <img src={qrDataUrl} alt="QR điểm danh" />}</div>}</div></section>}
 
     {profile?.role === 'student' && <section className="workflow dashboard-panel"><span className="panel-label">STUDENT DASHBOARD</span><h2>Xin chào, {profile.fullName || 'Sinh viên'}</h2><div className="profile-grid"><div><strong>MSSV</strong><span>{profile.studentId || 'Tài khoản thử nghiệm'}</span></div><div><strong>Lớp</strong><span>{profile.classCode}</span></div><div><strong>Email</strong><span>{profile.email}</span></div></div><div className="attendance-box camera-box">
       {studentStep === 'list' && <><h3>Phiên điểm danh đang mở</h3>{!openSessions.length ? <p>Hiện chưa có phiên điểm danh nào.</p> : <div className="session-list">{openSessions.map((session) => <div key={session.id} className="session-item"><strong>{session.title}</strong><span>Hết hạn {session.expiresAt.toDate().toLocaleTimeString('vi-VN')}</span><div className="attendance-controls"><button onClick={() => void startQrScanner(session)}>Điểm danh đầy đủ</button><button onClick={() => void openPinOnly(session)}>Chỉ nhập PIN</button></div></div>)}</div>}</>}

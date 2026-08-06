@@ -3,10 +3,13 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
+  query,
   serverTimestamp,
   setDoc,
   updateDoc,
+  where,
   writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore';
@@ -100,8 +103,63 @@ async function callGateway(payload: Record<string, unknown>, retries = 0): Promi
   throw lastError || new Error('Không thể kết nối cổng điểm danh.');
 }
 
+async function listOpenSessions(): Promise<AttendanceSession[]> {
+  if (!db) throw new Error('Firestore chưa được cấu hình.');
+  const snapshot = await getDocs(query(
+    collection(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions'),
+    where('status', '==', 'open'),
+  ));
+  return snapshot.docs
+    .map((item) => ({ id: item.id, ...item.data() } as AttendanceSession))
+    .filter((session) => session.expiresAt instanceof Timestamp)
+    .sort((a, b) => b.expiresAt.toMillis() - a.expiresAt.toMillis());
+}
+
+async function closeExpiredOrDuplicateSessions(sessions: AttendanceSession[]): Promise<AttendanceSession | null> {
+  if (!db) throw new Error('Firestore chưa được cấu hình.');
+  const now = Date.now();
+  const active = sessions.filter((session) => session.expiresAt.toMillis() > now);
+  const keep = active[0] || null;
+  const toClose = sessions.filter((session) => session.expiresAt.toMillis() <= now || (keep && session.id !== keep.id));
+  if (toClose.length) {
+    const batch = writeBatch(db);
+    toClose.forEach((session) => batch.update(
+      doc(db, 'courses', ACTIVE_COURSE_ID, 'attendanceSessions', session.id),
+      { status: 'closed', closedAt: serverTimestamp(), closeReason: session.expiresAt.toMillis() <= now ? 'expired' : 'duplicate_open_session' },
+    ));
+    await batch.commit();
+  }
+  return keep;
+}
+
+export async function recoverActiveAttendanceSession(): Promise<AttendanceAdminState | null> {
+  if (!db) throw new Error('Firestore chưa được cấu hình.');
+  const active = await closeExpiredOrDuplicateSessions(await listOpenSessions());
+  if (!active) return null;
+
+  const secretSnapshot = await getDoc(doc(
+    db,
+    'courses', ACTIVE_COURSE_ID,
+    'attendanceSessions', active.id,
+    'private', 'config',
+  ));
+  const pin = secretSnapshot.data()?.pin;
+  if (typeof pin !== 'string' || !/^\d{4}$/.test(pin)) {
+    throw new Error('Phiên đang mở không có PIN hợp lệ. Hãy đóng phiên và tạo lại.');
+  }
+
+  if (!(active.challengeExpiresAt instanceof Timestamp) || active.challengeExpiresAt.toMillis() <= Date.now()) {
+    const next = await rotateAttendanceChallenge(active.id, Number(active.slot || 0) + 1);
+    return { ...active, ...next, slot: Number(active.slot || 0) + 1 };
+  }
+  return { ...active, pin };
+}
+
 export async function openAttendanceSession(title: string): Promise<AttendanceAdminState> {
   if (!db) throw new Error('Firestore chưa được cấu hình.');
+  const existing = await closeExpiredOrDuplicateSessions(await listOpenSessions());
+  if (existing) throw new Error(`Đang có phiên “${existing.title}”. Hãy đóng phiên hiện tại trước khi mở phiên mới.`);
+
   const id = crypto.randomUUID();
   const pin = randomPin();
   const currentChallengeId = randomId();
