@@ -1,3 +1,5 @@
+import './ios-qr-input-compat.css';
+
 let previewUrl = '';
 
 function clearPreview(): void {
